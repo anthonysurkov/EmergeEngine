@@ -300,8 +300,14 @@ class MotifForest(EmergeHandler):
             nd.avg_edit for nd in all_nodes.values()
             if getattr(nd, "avg_edit", None) is not None
         ]
+
         if edit_vals:
-            norm = mcolors.Normalize(vmin=min(edit_vals), vmax=max(edit_vals))
+            vals = np.asarray(edit_vals, dtype=float)
+
+            vmin = np.percentile(vals, 10)
+            vmax = np.percentile(vals, 95)
+
+            norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=True)
             cmap = cm.get_cmap("Reds")
         else:
             norm = None
