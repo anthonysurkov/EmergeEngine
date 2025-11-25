@@ -91,7 +91,7 @@ class EmergeHandler:
         self.seq_len = seq_len
         self.df_len = self.df.shape[0]
 
-    def find_motif_seqs(
+    def get_motif_seqs(
         self,
         motif: str,
     ) -> pd.DataFrame:
@@ -105,6 +105,9 @@ class EmergeHandler:
 
         sub = self.df[self.df['5to3'].apply(match)]
         return sub
+
+    def get(self, seq: str) -> pd.DataFrame:
+        return self.df[self.df['5to3'] == seq]
 
     def _token_to_mask(self, mapping: dict[int, str]) -> str:
         mask = ["X"] * self.seq_len

@@ -103,9 +103,9 @@ class EmergeBPE(EmergeHandler):
             right.motif_seq = self.vocab[right_id]
             parent.motif_seq = self.vocab[parent_id]
 
-            left.seqs = self.find_motif_seqs(left.motif_seq)
-            right.seqs = self.find_motif_seqs(right.motif_seq)
-            parent.seqs = self.find_motif_seqs(parent.motif_seq)
+            left.seqs = self.get_motif_seqs(left.motif_seq)
+            right.seqs = self.get_motif_seqs(right.motif_seq)
+            parent.seqs = self.get_motif_seqs(parent.motif_seq)
 
             parent.rank = self.kmer_ranks.get(parent_id)
             parent.prevalence = len(parent.seqs)

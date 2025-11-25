@@ -1,6 +1,7 @@
 from pathlib import Path
 import pandas as pd
 
+from emerge_data import EmergeHandler
 from emerge_language import EmergeBPE
 from emerge_phenotype import ForestPhenotype
 
@@ -15,6 +16,10 @@ def main():
     df = df[df['mle'] >= 0.10]
     print(df)
     print(df.shape[0])
+
+    ctd1_handle = EmergeHandler(df_emerge = df)
+    query = ctd1_handle.get(seq='GGCUUUCAAC')
+    print(query)
 
     ctd1_bpe = EmergeBPE(
         df_emerge=df,
