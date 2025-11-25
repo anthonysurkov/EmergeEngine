@@ -38,7 +38,7 @@ class ForestPhenotype(MotifForest):
         self._bh_fdr(q=q)
 
     def append_edits(self):
-        self.traverse(func = self.append_node_editing)
+        self.traverse(func=self.append_node_editing)
 
     def append_node_editing(self, node: MotifNode) -> None:
         J = node.seqs['mle'].shape[0]

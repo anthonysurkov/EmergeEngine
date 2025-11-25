@@ -297,8 +297,8 @@ class MotifForest(EmergeHandler):
             raise ValueError('No connected motifs left after filtering.')
 
         edit_vals = [
-            nd.avg for nd in all_nodes.values()
-            if getattr(nd, "avg", None) is not None
+            nd.avg_edit for nd in all_nodes.values()
+            if getattr(nd, "avg_edit", None) is not None
         ]
         if edit_vals:
             norm = mcolors.Normalize(vmin=min(edit_vals), vmax=max(edit_vals))
@@ -331,8 +331,8 @@ class MotifForest(EmergeHandler):
             p_raw = getattr(nd, "p", None)
             p_str = f"{p_raw:.4f}" if p_raw is not None else "–"
 
-            avg = getattr(nd, "avg", None)
-            var = getattr(nd, "var", None)
+            avg = getattr(nd, "avg_edit", None)
+            var = getattr(nd, "var_edit", None)
             prev = getattr(nd, "prevalence", None)
             if prev is None or prev <= 0:
                 prev = 1
