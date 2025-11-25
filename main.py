@@ -1,7 +1,7 @@
 from pathlib import Path
 import pandas as pd
 
-from emerge_data import EmergeHandler
+from emerge_data import EmergePredicate, EmergeHandler
 from emerge_language import EmergeBPE
 from emerge_phenotype import ForestPhenotype
 
@@ -11,15 +11,14 @@ INFILE = DATA_DIR / 'ctd_ad1_clean.csv'
 
 def main():
     df = pd.read_csv(INFILE, index_col=0)
-    df = df.rename(columns={'mle_ad1': 'mle', 'n_ad1': 'n', 'k_ad1': 'k'})
-    df = df[df['n'] >= 10].sort_values(by='mle', ascending=False)
-    df = df[df['mle'] >= 0.10]
-    print(df)
-    print(df.shape[0])
+    df = df.rename(columns={'n_ad1': 'n', 'k_ad1': 'k'})
 
     ctd1_handle = EmergeHandler(df_emerge = df)
-    query = ctd1_handle.get(seq='GGCUUUCAAC')
-    print(query)
+
+    edited_10 = EmergePredicate.col_geq('mle', 0.10)
+    n_10 = EmergePredicate.col_geq('n', 10)
+    df = ctd1_handle.query(edited_10, n_10, columns=['5to3','n','k'])
+    print(df)
 
     ctd1_bpe = EmergeBPE(
         df_emerge=df,

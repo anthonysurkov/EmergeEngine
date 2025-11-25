@@ -1,12 +1,16 @@
 #emerge_data.py
 from __future__ import annotations
 
-import pandas as pd
-import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, List, Callable, Any
-import numbers
+import functools
+import operator
 import warnings
+
+import pandas as pd
+from pandas.api.types import is_bool_dtype
+import numpy as np
+import numbers
 import re
 
 import networkx as nx
@@ -14,6 +18,110 @@ from pyvis.network import Network
 from matplotlib import cm
 from matplotlib import colors as mcolors
 from networkx.drawing.nx_agraph import graphviz_layout
+
+class EmergePredicate:
+    def __init__(
+        self,
+        func: Callable[[pd.DataFrame], pd.Series],
+        name: Optional[str] = None
+    ) -> None:
+        self._func = func
+        self.name = name or getattr(func, "__name__", "predicate")
+
+    def __call__(self, df: pd.DataFrame) -> pd.Series:
+        mask = self._func(df)
+
+        if not isinstance(mask, pd.Series):
+            raise TypeError(
+                f'predicate {self.name!r} must return a pandas Series, '
+                f'got {type(mask)}'
+            )
+        if mask is None:
+            raise ValueError(
+                f'boolean mask is empty; cannot be'
+            )
+        if not is_bool_dtype(mask.dtype):
+            raise TypeError(
+                f'predicate {self.name!r} must return a boolean Series, '
+                f'got dtype {mask.dtype}'
+            )
+        if not mask.index.equals(df.index):
+            raise ValueError(
+                f'predicate {self.name!r} returned a Series with a different '
+                f'index than the input DataFrame'
+            )
+
+        return mask
+
+    def __and__(self, other: EmergePredicate) -> EmergePredicate:
+        if not isinstance(other, EmergePredicate):
+            return NotImplemented
+
+        def _and(df: pd.DataFrame) -> pd.Series:
+            return self(df) & other(df)
+
+        return EmergePredicate(_and, name=f'({self} & {other})')
+
+    def __or__(self, other: EmergePredicate) -> EmergePredicate:
+        if not isinstance(other, EmergePredicate):
+            return NotImplemented
+
+        def _or(df: pd.DataFrame) -> pd.Series:
+            return self(df) | other(df)
+
+        return EmergePredicate(_or, name=f'({self} | {other})')
+
+    def __invert__(self) -> EmergePredicate:
+        def _not(df: pd.DataFrame) -> pd.Series:
+            return ~self(df)
+
+        return EmergePredicate(_not, name=f'(~{self})')
+
+    def __str__(self) -> str:
+        return self.name
+
+    def __repr__(self) -> str:
+        return f'EmergePredicate(name={self.name!r})'
+
+    @staticmethod
+    def col_geq(col: str, value: float) -> EmergePredicate:
+        def _pred(df: pd.DataFrame) -> pd.Series:
+            return df[col] >= value
+        return EmergePredicate(_pred, name=f'{col} >= {value}')
+
+    @staticmethod
+    def col_leq(col: str, value: float) -> EmergePredicate:
+        def _pred(df: pd.DataFrame) -> pd.Series:
+            return df[col] <= value
+        return EmergePredicate(_pred, name=f'{col} <= {value}')
+
+    @staticmethod
+    def col_gt(col: str, value: float) -> EmergePredicate:
+        def _pred(df: pd.DataFrame) -> pd.Series:
+            return df[col] > value
+        return EmergePredicate(_pred, name=f'{col} > {value}')
+
+    @staticmethod
+    def col_lt(col: str, value: float) -> EmergePredicate:
+        def _pred(df: pd.DataFrame) -> pd.Series:
+            return df[col] < value
+        return EmergePredicate(_pred, name=f'{col} < {value}')
+
+    @staticmethod
+    def col_eq(col:str, value: float) -> EmergePredicate:
+        def _pred(df: pd.DataFrame) -> pd.Series:
+            return df[col] == value
+        return EmergePredicate(_pred, name=f'{col} == {value}')
+
+    @staticmethod
+    def str_contains(
+        col: str,
+        pattern: str,
+        regex: bool = True
+    ) -> EmergePredicate:
+        def _pred(df: pd.DataFrame) -> pd.Series:
+            return df[col].astype('string').str.contains(pattern, regex=regex)
+        return EmergePredicate(_pred, name=f'{col}.contains({pattern!r})')
 
 class EmergeHandler:
     def __init__(
@@ -91,23 +199,27 @@ class EmergeHandler:
         self.seq_len = seq_len
         self.df_len = self.df.shape[0]
 
-    def get_motif_seqs(
+    # TODO: provide motif spec option that isn't A0C1G2 etc.
+    # want something like ACTG0-3. also support for gappy motifs, e.g.
+    # ACTGXXXGT0-8. serves as a nice internal identifier for motifs too
+    # specify with bpe_syntax=False in args
+    def contains_motif(
         self,
-        motif: str,
-    ) -> pd.DataFrame:
+        motif: str
+    ) -> EmergePredicate:
         mapping = self._parse_token(motif)
-
         mask = self._token_to_mask(mapping)
 
-        def match(s):
-            s = s.replace('T', 'U')
-            return self._matches_mask(s, mask)
+        def _match(seq) -> bool:
+            #if seq is None or pd.isna(seq):
+            #    return False
+            #seq = str(seq)
+            return self._matches_mask(seq, mask)
 
-        sub = self.df[self.df['5to3'].apply(match)]
-        return sub
+        def _pred(df: pd.DataFrame) -> pd.Series:
+            return df['5to3'].apply(_match)
 
-    def get(self, seq: str) -> pd.DataFrame:
-        return self.df[self.df['5to3'] == seq]
+        return EmergePredicate(_pred, name=f'5to3.contains({motif!r})')
 
     def _token_to_mask(self, mapping: dict[int, str]) -> str:
         mask = ["X"] * self.seq_len
@@ -123,6 +235,43 @@ class EmergeHandler:
     @staticmethod
     def _matches_mask(seq: str, mask: str) -> bool:
         return all(m == "X" or s == m for s, m in zip(seq, mask))
+
+    def get_motif_seqs(
+        self,
+        motif: str
+    ) -> pd.DataFrame:
+        request = self.contains_motif(motif)
+        mask = request(self.df)
+        print(motif, "→ matches:", int(mask.sum()))
+        return self.query(request)
+
+    def query(
+        self,
+        *predicates: EmergePredicate,
+        columns: Optional[Iterable[str]] = None,
+        copy: bool = True
+    ) -> pd.DataFrame:
+        df = self.df
+
+        combined = self._combine_predicates(predicates)
+        if combined is not None:
+            mask = combined(df)
+            df = df[mask]
+
+        if columns is None:
+            columns = ['5to3','n','k','mle']
+        df = df.loc[:, list(columns)]
+
+        return df.copy(deep=True) if copy else df
+
+    def _combine_predicates(
+        self,
+        predicates: Sequence[EmergePredicate]
+    ) -> Optional[EmergePredicate]:
+        if not predicates:
+            return None
+        return functools.reduce(operator.and_, predicates)
+
 
 @dataclass(eq=False)
 class MotifNode:
