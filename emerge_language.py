@@ -14,6 +14,7 @@ class EmergeBPE(EmergeHandler):
         self,
         df_emerge: pd.DataFrame,
         kmax: int = 6,
+        special: Optional[set[str]] = None,
         seq_col: str = '5to3',
         n_col: str = 'n',
         k_col: str = 'k',
@@ -34,6 +35,21 @@ class EmergeBPE(EmergeHandler):
         if kmax > self.seq_len:
             raise ValueError('arg `kmax` must not exceed RNA length')
 
+        if special is None:
+            special = set()
+        else:
+            if not isinstance(special, set):
+                raise TypeError(
+                    'arg `special` must be a list of chars, '
+                    f'got {type(special)}'
+                )
+            if not all(isinstance(x, str) and len(x) == 1 for x in special):
+                raise ValueError(
+                    'arg `special` must be a list of chars; '
+                    f'at least one element is a str longer than 1 char'
+                )
+        special.add('E')
+
         # configure alphabet
         base_chars = set(''.join(self.df['5to3'].astype(str)))
         unexpected = base_chars - set(['A','G','C','U'])
@@ -48,12 +64,13 @@ class EmergeBPE(EmergeHandler):
             f'{letter}{i}' for letter in base_chars
             for i in range(0, self.seq_len)
         ]
-        tokens = alphabet + ['E'] # end-of-sequence
+        tokens = alphabet + list(special)
 
         self.kmax = kmax
         self.vocab = {i: char for i, char in enumerate(tokens)}
         self.inverse_vocab = {char: i for i, char in self.vocab.items()}
         self.base_chars = base_chars
+        self.special = special
 
         self.merges = {}
         self.global_ranks = {}
@@ -144,8 +161,6 @@ class EmergeBPE(EmergeHandler):
             pair_id = self._find_freq_pair(
                 token_ids=token_ids,
                 vocab=self.vocab,
-                kmax=self.kmax,
-                base_chars=self.base_chars,
                 mode='most'
             )
             if pair_id is None:
@@ -170,16 +185,14 @@ class EmergeBPE(EmergeHandler):
             for i, tid in enumerate(ids, start=1):
                 self.kmer_ranks[tid] = i
 
-    @staticmethod
     def _find_freq_pair(
+        self,
         token_ids: list[int],
         vocab: dict[int, str],
-        kmax: int = 6,
-        base_chars: Optional[list[str]] = None,
         mode: str = 'most'
     ) -> Optional[tuple[int, int]]:
-        if base_chars is None:
-            base_chars = ['A','C','G','U']
+        if self.base_chars is None:
+            self.base_chars = ['A','C','G','U']
 
         pairs = Counter(zip(token_ids, token_ids[1:]))
 
@@ -189,12 +202,15 @@ class EmergeBPE(EmergeHandler):
                 tok0 = vocab[p0]
                 tok1 = vocab[p1]
 
-                if tok0 == 'E' or tok1 == 'E':
+                if (
+                    any(ch in self.special for ch in tok0) or
+                    any(ch in self.special for ch in tok1)
+                ):
                     continue
 
                 merged = tok0 + tok1
-                merged_len = sum(ch in base_chars for ch in merged)
-                if merged_len > kmax:
+                merged_len = sum(ch in self.base_chars for ch in merged)
+                if merged_len > self.kmax:
                     continue
 
             filtered[(p0, p1)] = count
@@ -239,3 +255,4 @@ class EmergeBPE(EmergeHandler):
                     kmer = "".join(tokens[i:i+k])
                     counts[kmer] += 1
         return counts
+

@@ -242,7 +242,6 @@ class EmergeHandler:
     ) -> pd.DataFrame:
         request = self.contains_motif(motif)
         mask = request(self.df)
-        print(motif, "→ matches:", int(mask.sum()))
         return self.query(request)
 
     def query(
