@@ -38,7 +38,7 @@ class ForestPhenotype(MotifForest):
         self._bh_fdr(q=q)
 
     def append_edits(self):
-        self.traverse(function = self.append_node_editing)
+        self.traverse(func = self.append_node_editing)
 
     def append_node_editing(self, node: MotifNode) -> None:
         J = node.seqs['mle'].shape[0]
@@ -63,14 +63,14 @@ class ForestPhenotype(MotifForest):
     ) -> None:
         a, b, res = self._fit_beta_binom(node)
         if not res.success:
-            warnings.warn(
-                f'Beta-binomial fit did not converge for node ID {node.node_id}'
-                f' / motif {node.motif_seq}. Appending node seqs below:'
-                f'{node.seqs}'
-            )
             if correct_if_bb_bad:
                 self.append_node_editing(node)
                 return
+            warnings.warn(
+                f'Beta-binomial fit did not converge for node ID {node.node_id}'
+                f' / motif {node.motif_seq}, and correct_if_bb_bad behavior'
+                f' is off. Appending node seqs below:\n {node.seqs}'
+            )
         node.avg_edit = a / (a + b)
         node.var_edit = (a * b) / (((a + b)**2) * (a + b + 1))
 

@@ -176,7 +176,6 @@ class MotifForest(EmergeHandler):
             k_col = k_col,
             to_rna = to_rna
         )
-
         if not forest:
             raise TypeError(
                 'arg `forest` cannot neither be an empty list nor None.'
@@ -211,7 +210,7 @@ class MotifForest(EmergeHandler):
                 return
             visited.add(node)
             if func is not None:
-                result = func (node, *params)
+                result = func(node, *params)
                 results.append(result)
             for child in node.children:
                 _visit(child)
