@@ -3,7 +3,7 @@ import pandas as pd
 
 from emerge_data import EmergePredicate, EmergeHandler
 from emerge_language import EmergeBPE
-from emerge_phenotype import ForestPhenotype
+from emerge_phenotype import ForestPhenotyper
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / 'data'
@@ -28,7 +28,7 @@ def main():
     )
     emerge_bpe.encode()
 
-    emerge_phenotype = ForestPhenotype(
+    emerge_phenotype = ForestPhenotyper(
         forest=emerge_bpe.to_forest(),
         df_emerge=df
     )

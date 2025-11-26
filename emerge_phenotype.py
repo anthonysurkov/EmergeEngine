@@ -8,7 +8,7 @@ from scipy.stats import binomtest, betabinom
 from scipy.optimize import minimize
 from emerge_data import MotifForest, MotifNode
 
-class ForestPhenotype(MotifForest):
+class ForestPhenotyper(MotifForest):
     def __init__(
         self,
         forest: list[MotifNode],

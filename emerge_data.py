@@ -315,18 +315,19 @@ class MotifForest(EmergeHandler):
         self,
         forest: list[MotifNode],
         df_emerge: Optional[pd.DataFrame],
-        seq_col: Optional[str] = '5to3',
-        n_col: Optional[str] = 'n',
-        k_col: Optional[str] = 'k',
-        to_rna: Optional[bool] = True
+        seq_col: str = '5to3',
+        n_col: str = 'n',
+        k_col: str = 'k',
+        to_rna: bool = True
     ) -> None:
-        super().__init__(
-            df_emerge = df_emerge,
-            seq_col = seq_col,
-            n_col = n_col,
-            k_col = k_col,
-            to_rna = to_rna
-        )
+        if df_emerge:
+            super().__init__(
+                df_emerge = df_emerge,
+                seq_col = seq_col,
+                n_col = n_col,
+                k_col = k_col,
+                to_rna = to_rna
+            )
         if not forest:
             raise TypeError(
                 'arg `forest` cannot neither be an empty list nor None.'
