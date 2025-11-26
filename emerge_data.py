@@ -320,7 +320,7 @@ class MotifForest(EmergeHandler):
         k_col: str = 'k',
         to_rna: bool = True
     ) -> None:
-        if df_emerge:
+        if df_emerge is not None:
             super().__init__(
                 df_emerge = df_emerge,
                 seq_col = seq_col,

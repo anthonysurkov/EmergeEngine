@@ -27,22 +27,22 @@ def main():
         special=special
     )
     emerge_bpe.encode()
+    emerge_forest = emerge_bpe.to_forest()
 
-    emerge_phenotype = ForestPhenotyper(
-        forest=emerge_bpe.to_forest(),
-        df_emerge=df
+    emerge_phenotyper = ForestPhenotyper(
+        forest=emerge_forest,
     )
-    list_before = emerge_phenotype.flatten()
-    emerge_phenotype.prune_by_enrichment()
-    list_after = emerge_phenotype.flatten()
+    list_before = emerge_forest.flatten()
+    emerge_phenotyper.prune_by_enrichment()
+    list_after = emerge_forest.flatten()
 
     total_before = len(list_before)
     total_after = len(list_after)
     print(f'total before: {total_before}, total after: {total_after}')
 
-    emerge_phenotype.traverse(func=emerge_phenotype.append_edits_bb)
+    emerge_forest.traverse(func=emerge_phenotyper.append_edits_bb)
 
-    emerge_phenotype.to_html(outfile='test.html', min_length=0)
+    emerge_forest.to_html(outfile='test.html', min_length=0)
 
 if __name__ == "__main__":
     main()

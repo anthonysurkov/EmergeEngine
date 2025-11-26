@@ -7,7 +7,14 @@ from collections import defaultdict, Counter, deque
 from collections.abc import Iterable
 from typing import Optional
 import re
-from emerge_data import EmergeHandler, MotifNode
+from emerge_data import EmergeHandler, MotifNode, MotifForest
+
+class ForestCombinations:
+    def __init__(
+        self,
+        forest: list[MotifNode]
+    ):
+        print('a')
 
 class EmergeBPE(EmergeHandler):
     def __init__(
@@ -92,7 +99,7 @@ class EmergeBPE(EmergeHandler):
         if not self.merges:
             warnings.warn('no merges made in encode()')
 
-    def to_forest(self):
+    def to_forest(self) -> MotifForest:
         nodes: dict[int, MotifNode] = {}
 
         def get_node(node_id: int) -> MotifNode:
@@ -136,8 +143,7 @@ class EmergeBPE(EmergeHandler):
             for (l, r), pid in self.merges.items()
             if pid not in all_children
         ]
-
-        return roots
+        return MotifForest(roots, self.df)
 
     def _build_corpus(self) -> list[str]:
         corpus: list[str] = []

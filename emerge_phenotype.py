@@ -8,24 +8,17 @@ from scipy.stats import binomtest, betabinom
 from scipy.optimize import minimize
 from emerge_data import MotifForest, MotifNode
 
-class ForestPhenotyper(MotifForest):
+class ForestPhenotyper():
     def __init__(
         self,
-        forest: list[MotifNode],
-        df_emerge: pd.DataFrame,
-        seq_col: str = '5to3',
-        n_col: str = 'n',
-        k_col: str = 'k',
-        to_rna: bool = True
+        forest: MotifForest,
     ):
-        super().__init__(
-            forest = forest,
-            df_emerge = df_emerge,
-            seq_col = seq_col,
-            n_col = n_col,
-            k_col = k_col,
-            to_rna = to_rna
-        )
+        if not isinstance(forest, MotifForest):
+            raise ValueError(
+                'arg `forest` must be a MotifForest. '
+                f'got: {type(forest)}'
+            )
+        self.forest = forest
 
     def prune_by_enrichment(
         self,
@@ -34,11 +27,11 @@ class ForestPhenotyper(MotifForest):
         def _compute_p(node: MotifNode):
             node.p = self._binom_test(node=node)
 
-        self.traverse(func=_compute_p)
+        self.forest.traverse(func=_compute_p)
         self._bh_fdr(q=q)
 
     def append_edits(self):
-        self.traverse(func=self.append_node_editing)
+        self.forest.traverse(func=self.append_node_editing)
 
     def append_node_editing(self, node: MotifNode) -> None:
         J = node.seqs['mle'].shape[0]
@@ -79,7 +72,7 @@ class ForestPhenotyper(MotifForest):
         q: float = 0.05
     ) -> None:
         # Benjamini-Hochberg false discovery rate control
-        nodes = list(self.flatten())
+        nodes = list(self.forest.flatten())
         if not nodes:
             return
 
@@ -95,7 +88,7 @@ class ForestPhenotyper(MotifForest):
         if not np.any(below):
             # nothing survives; prune everything
             for node in nodes:
-                self.prune(node)
+                self.forest.prune(node)
             return
 
         k = np.max(np.where(below)[0])
@@ -104,12 +97,12 @@ class ForestPhenotyper(MotifForest):
 
         for node, p in zip(nodes, pvals):
             if p > cutoff:
-                self.prune(node)
+                self.forest.prune(node)
 
     def _binom_test(self, node: MotifNode) -> float:
         p0 = 0.25 ** node.motif_len
         k = node.seqs.shape[0]
-        res = binomtest(k=k, n=self.df_len, p=p0, alternative='greater')
+        res = binomtest(k=k, n=self.forest.df_len, p=p0, alternative='greater')
         return res.pvalue # might want to expose rest of res later
 
     @staticmethod
