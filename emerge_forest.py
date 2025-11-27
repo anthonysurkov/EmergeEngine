@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from typing import Optional
 import re
+from scipy.stats import binomtest
 
 import networkx as nx
 from pyvis.network import Network
@@ -283,7 +284,7 @@ class ForestCanopy:
     def __iter__(self):
         return iter(self.canopy)
 
-    def generate(self) -> None:
+    def generate(self, offset: int = 2) -> None:
         nodes = self.forest.flatten()
         node_ids = [node.node_id for node in nodes]
 
@@ -297,7 +298,7 @@ class ForestCanopy:
                     continue
 
                 candidate_seq = this_node.motif_seq + that_node.motif_seq
-                if not self._token_useful(candidate_seq):
+                if len(candidate_seq) / 2 > self.forest.seq_len - offset:
                     continue
 
                 new_node = MotifNode(
@@ -305,11 +306,22 @@ class ForestCanopy:
                     node_id = max(node_ids) + 1
                 )
                 new_node.seqs = self.forest.get_motif_seqs(new_node.motif_seq)
+                if new_node.seqs is None or new_node.seqs.empty:
+                    continue
+
+                new_node.p = self._canopy_bino_test(
+                    node1=this_node,
+                    node2=that_node,
+                    node12=new_node
+                )
 
                 new_node.add_parent(this_node)
                 new_node.add_parent(that_node)
 
                 self.canopy.append(new_node)
+
+    def prune_by_editing(self, q: float = 0.05) -> None:
+        self._bh_fdr(nodes=self.canopy, q=q)
 
     def _compatible(self, token1: str, token2: str) -> bool:
         pos1 = self._token_to_pos(token=token1)
@@ -338,9 +350,59 @@ class ForestCanopy:
         product = arr1 * arr2
         return product.sum() == 0
 
-    # TODO: unfuck this
-    def _token_useful(self, token: str, offset: int = 2) -> bool:
-        if len(token) / 2 > self.forest.seq_len - offset:
-            return False
-        return True
+    # TODO: figure out if this is a legit test; same potential problem as with
+    #       calculating editing rates generally, as currently done in
+    #       ForestPhenotyper
+    @staticmethod
+    def _canopy_bino_test(
+        node1: MotifNode,
+        node2: MotifNode,
+        node12: MotifNode
+    ) -> float:
+        if getattr(node1, 'avg_edit', None) is None:
+            node1.avg_edit = node1.seqs['mle'].mean()
+        if getattr(node2, 'avg_edit', None) is None:
+            node2.avg_edit = node2.seqs['mle'].mean()
+
+        p0 = max([node1.avg_edit, node2.avg_edit])
+        k = int(node12.seqs['k'].sum())
+        n = int(node12.seqs['n'].sum())
+
+        res = binomtest(k=k, n=n, p=p0, alternative='greater')
+        return res.pvalue
+
+    @staticmethod
+    def _bh_fdr(
+        nodes: list[MotifNode],
+        q: float = 0.05
+    ) -> None:
+        # Benjamini-Hochberg false discovery rate control
+        if nodes is None:
+            return
+
+        pvals = np.asarray([node.p for node in nodes], dtype=float)
+        m = pvals.size
+
+        order = np.argsort(pvals)
+        sorted_p = pvals[order]
+
+        thresholds = q * np.arange(1, m+1) / m
+        below = sorted_p <= thresholds
+
+        if not np.any(below):
+            return None
+
+        k = np.max(np.where(below)[0])
+        cutoff = sorted_p[k]
+        print(f'FDR p-value cutoff: {cutoff}')
+
+        for node, p in zip(nodes, pvals):
+            if p > cutoff:
+                nodes.remove(node)
+                for parent in node.parents:
+                    parent.children.remove(node)
+                for child in node.children:
+                    child.parents.remove(node)
+        return nodes
+
 

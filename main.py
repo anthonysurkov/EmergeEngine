@@ -28,21 +28,33 @@ def main():
         special=special
     )
     emerge_bpe.encode()
-    emerge_forest = emerge_bpe.to_forest().with_canopy()
+    emerge_forest = emerge_bpe.to_forest()
 
-    emerge_phenotyper = ForestPhenotyper(forest=emerge_forest)
-
+    emerge_phenotyper = ForestPhenotyper(
+        forest=emerge_forest,
+    )
     list_before = emerge_forest.flatten()
     emerge_phenotyper.prune_by_enrichment()
-    list_after = emerge_forest.flatten()
-
+    list_after = emerge_forest.flatten(with_canopy=True)
     total_before = len(list_before)
     total_after = len(list_after)
     print(f'total before: {total_before}, total after: {total_after}')
 
-    emerge_forest.traverse(func=emerge_phenotyper.append_edits_bb)
+    list_before = emerge_forest.flatten()
+    emerge_forest = emerge_forest.with_canopy()
+    list_after = emerge_forest.flatten(with_canopy=True)
+    total_before = len(list_before)
+    total_after = len(list_after)
+    print(f'total before: {total_before}, total after: {total_after}')
 
-    emerge_forest.to_html(outfile='test.html', min_length=0)
+    list_before = emerge_forest.flatten()
+    emerge_forest.canopy.prune_by_editing(q=0.001)
+    list_after = emerge_forest.flatten(with_canopy=True)
+    total_before = len(list_before)
+    total_after = len(list_after)
+    print(f'total before: {total_before}, total after: {total_after}')
+
+    emerge_forest.to_html(outfile='test1.html', min_length=0)
 
 if __name__ == "__main__":
     main()

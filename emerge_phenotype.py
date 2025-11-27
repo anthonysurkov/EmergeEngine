@@ -29,7 +29,7 @@ class ForestPhenotyper():
             node.p = self._binom_test(node=node)
 
         self.forest.traverse(func=_compute_p)
-        self._bh_fdr(q=q)
+        self.bh_fdr(forest=self.forest, q=q)
 
     def append_edits(self):
         self.forest.traverse(func=self.append_node_editing)
@@ -68,13 +68,13 @@ class ForestPhenotyper():
         node.avg_edit = a / (a + b)
         node.var_edit = (a * b) / (((a + b)**2) * (a + b + 1))
 
-    def _bh_fdr(
+    def bh_fdr(
         self,
+        forest: MotifForest,
         q: float = 0.05
     ) -> None:
         # Benjamini-Hochberg false discovery rate control
         nodes = sorted(self.forest.flatten(), key=lambda nd: nd.node_id)
-        #nodes = list(self.forest.flatten())
         if not nodes:
             return
 
