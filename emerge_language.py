@@ -3,92 +3,13 @@ from __future__ import annotations
 
 import warnings
 import pandas as pd
+import numpy as np
 from collections import defaultdict, Counter, deque
 from collections.abc import Iterable
 from typing import Optional
 import re
-from emerge_data import EmergeHandler, MotifNode, MotifForest
-
-class ForestCanopy:
-    def __init__(
-        self,
-        forest: MotifForest
-    ):
-        if not isinstance(forest, MotifForest):
-            raise TypeError(
-                'arg `forest` must be a MotifForest. '
-                f'got: {type(forest)}'
-            )
-        self.forest = forest
-        self.canopy = []
-
-    def generate(self):
-        nodes = self.forest.flatten()
-        node_ids = [node_id for node.node_id in nodes]
-
-        while nodes:
-            this_node = nodes.pop()
-            for that_node in nodes:
-                if not self._compatible(
-                    this_node.motif_seq,
-                    that_node.motif_seq
-                ):
-                    continue
-                new_node = MotifNode(
-                    motif_seq = this_node.motif_seq + that_node.motif_seq,
-                    node_id = max(node_ids) + 1
-                )
-                new_node.seqs = forest.get_motif_seqs(new_node.motif_seq)
-
-
-        for this_node in self.forest:
-            this_node.visited = self.visited_master
-
-            for node_id, status in this_node.visited:
-                if status == 1:
-                    continue
-                that_node = self.node_dict[node_id]
-
-                if not self._compatible(
-                    this_node.motif_seq,
-                    that_node.motif_seq
-                ):
-                    that_node.visited = self.visited_master
-                    that_node.visited[this_node.node_id] = 1
-                    continue
-
-
-    @staticmethod
-    def _compatible(token1: str, token2: str) -> bool:
-        pos1 = ForestCanopy._token_to_pos(token=token1)
-        pos2 = ForestCanopy._token_to_pos(token=token2)
-        return ForestCanopy._compatible_by_pos(arr1=pos1, arr2=pos2)
-
-    @staticmethod
-    def _token_to_pos(token: str) -> np.ndarray:
-        assert isinstance(token, str), 'token must be str'
-
-        pos_nums = [int(m) for m in re.findall(r'\d+', token)]
-        if not pos_nums:
-            return np.array([], dtype=int)
-
-        low = min(pos_nums)
-        high = max(pos_nums)
-        pos_set = set(pos_nums)
-        return np.array(
-            [1 if i in pos_set else 0 for i in range(low, high+1)],
-             dtype=int
-        )
-
-    @staticmethod
-    def _compatible_by_pos(arr1: np.ndarray, arr2: np.ndarray) -> bool:
-        assert np.isin(arr1, [0, 1]).all(), 'arr1 must be 0/1'
-        assert np.isin(arr2, [0, 1]).all(), 'arr2 must be 0/1'
-        assert arr1.size == arr2.size, 'arrays must be same size'
-
-        product = arr1 * arr2
-        return product.sum() == 0
-
+from emerge_data import EmergeHandler, MotifNode
+from emerge_forest import MotifForest
 
 class EmergeBPE(EmergeHandler):
     def __init__(

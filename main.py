@@ -3,6 +3,7 @@ import pandas as pd
 
 from emerge_data import EmergePredicate, EmergeHandler
 from emerge_language import EmergeBPE
+from emerge_forest import MotifForest
 from emerge_phenotype import ForestPhenotyper
 
 ROOT = Path(__file__).resolve().parent
@@ -27,11 +28,10 @@ def main():
         special=special
     )
     emerge_bpe.encode()
-    emerge_forest = emerge_bpe.to_forest()
+    emerge_forest = emerge_bpe.to_forest().with_canopy()
 
-    emerge_phenotyper = ForestPhenotyper(
-        forest=emerge_forest,
-    )
+    emerge_phenotyper = ForestPhenotyper(forest=emerge_forest)
+
     list_before = emerge_forest.flatten()
     emerge_phenotyper.prune_by_enrichment()
     list_after = emerge_forest.flatten()

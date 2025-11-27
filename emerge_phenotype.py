@@ -6,7 +6,8 @@ import pandas as pd
 import numpy as np
 from scipy.stats import binomtest, betabinom
 from scipy.optimize import minimize
-from emerge_data import MotifForest, MotifNode
+from emerge_data import MotifNode
+from emerge_forest import MotifForest
 
 class ForestPhenotyper():
     def __init__(
@@ -72,7 +73,8 @@ class ForestPhenotyper():
         q: float = 0.05
     ) -> None:
         # Benjamini-Hochberg false discovery rate control
-        nodes = list(self.forest.flatten())
+        nodes = sorted(self.forest.flatten(), key=lambda nd: nd.node_id)
+        #nodes = list(self.forest.flatten())
         if not nodes:
             return
 
