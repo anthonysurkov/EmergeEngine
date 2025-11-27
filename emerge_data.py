@@ -199,6 +199,33 @@ class EmergeHandler:
         self.seq_len = seq_len
         self.df_len = self.df.shape[0]
 
+    def query(
+        self,
+        *predicates: EmergePredicate,
+        columns: Optional[Iterable[str]] = None,
+        copy: bool = True
+    ) -> pd.DataFrame:
+        df = self.df
+
+        combined = self._combine_predicates(predicates)
+        if combined is not None:
+            mask = combined(df)
+            df = df[mask]
+
+        if columns is None:
+            columns = ['5to3','n','k','mle']
+        df = df.loc[:, list(columns)]
+
+        return df.copy(deep=True) if copy else df
+
+    def get_motif_seqs(
+        self,
+        motif: str
+    ) -> pd.DataFrame:
+        request = self.contains_motif(motif)
+        mask = request(self.df)
+        return self.query(request)
+
     # TODO: provide motif spec option that isn't A0C1G2 etc.
     # want something like ACTG0-3. also support for gappy motifs, e.g.
     # ACTGXXXGT0-8. serves as a nice internal identifier for motifs too
@@ -227,6 +254,14 @@ class EmergeHandler:
             mask[pos] = base
         return "".join(mask)
 
+    def _combine_predicates(
+        self,
+        predicates: Sequence[EmergePredicate]
+    ) -> Optional[EmergePredicate]:
+        if not predicates:
+            return None
+        return functools.reduce(operator.and_, predicates)
+
     @staticmethod
     def _parse_token(seq: str) -> dict[int, str]:
         token_re = re.compile(r'([ACGU])(\d+)')
@@ -236,48 +271,12 @@ class EmergeHandler:
     def _matches_mask(seq: str, mask: str) -> bool:
         return all(m == "X" or s == m for s, m in zip(seq, mask))
 
-    def get_motif_seqs(
-        self,
-        motif: str
-    ) -> pd.DataFrame:
-        request = self.contains_motif(motif)
-        mask = request(self.df)
-        return self.query(request)
-
-    def query(
-        self,
-        *predicates: EmergePredicate,
-        columns: Optional[Iterable[str]] = None,
-        copy: bool = True
-    ) -> pd.DataFrame:
-        df = self.df
-
-        combined = self._combine_predicates(predicates)
-        if combined is not None:
-            mask = combined(df)
-            df = df[mask]
-
-        if columns is None:
-            columns = ['5to3','n','k','mle']
-        df = df.loc[:, list(columns)]
-
-        return df.copy(deep=True) if copy else df
-
-    def _combine_predicates(
-        self,
-        predicates: Sequence[EmergePredicate]
-    ) -> Optional[EmergePredicate]:
-        if not predicates:
-            return None
-        return functools.reduce(operator.and_, predicates)
-
-
 @dataclass(eq=False)
 class MotifNode:
     motif_seq: Optional[str] = None
-    seqs: Optional[pd.DataFrame] = None
-
     node_id: Optional[int] = None
+
+    seqs: Optional[pd.DataFrame] = None
     rank: Optional[int] = None
     prevalence: Optional[int] = None
     avg_edit: Optional[float] = None
@@ -339,6 +338,9 @@ class MotifForest(EmergeHandler):
                     f'found: {type(node)}'
                 )
         self.forest = forest
+
+    def __iter__(self):
+        return iter(self.forest.flatten())
 
     def traverse(
         self,
