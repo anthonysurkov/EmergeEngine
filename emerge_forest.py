@@ -146,8 +146,6 @@ class MotifForest(EmergeHandler):
         G = nx.DiGraph()
         for nd in all_nodes.values():
             for child in nd.children:
-                if len(child.motif_seq) == 2:
-                    continue
                 if child.motif_seq in all_nodes:
                     G.add_edge(child.motif_seq, nd.motif_seq)
 

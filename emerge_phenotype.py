@@ -20,6 +20,40 @@ class ForestPhenotyper():
                 f'got: {type(forest)}'
             )
         self.forest = forest
+        self.edits_appended: bool = False
+
+    def append_edits_edgewise(self):
+        self.forest.traverse(func=_compute_deltas)
+
+    # delta := Y_S(v) - Y_S(k), Y := avg edit. see p.123 of notebook
+    def _append_node_deltas(self):
+        # encompass _compute_deltas(self) in this function. have it act on one
+        # node. use append_edits_edgewise to traverse forest and compute
+        # deltas for all. then, extend to do permutation p-vals in one pass,
+        # instead of two traversals. 11:55am
+
+    def _compute_deltas(self):
+        if not self.edits_appended:
+            self.append_edits()
+        for node in forest:
+            if len(node.parents) != 2:
+                seq = node.motif_seq
+                warnings.warn(
+                    'length of parent is not 2 for node with seq {seq}'
+                )
+            l_parent, r_parent = node.parents
+            # K := S(p) \ S(v), S(x) := seqs matching restriction x. see p. 123
+            v_seqs = set(node.seqs)
+            l_seqs = l_parent.seqs
+            r_seqs = r_parent.seqs
+
+            l_K = [seq for seq in l_seqs if seq not in v_seqs]
+            r_K = [seq for seq in r_seqs if seq not in v_seqs]
+            l_K_edit = self._get_avg_edit(l_K)
+            r_K_edit = self._get_avg_edit(r_K)
+
+            node.l_delta = node.avg_edit - l_K_edit
+            node.r_delta = node.avg_edit - r_K_edit
 
     def prune_by_enrichment(
         self,
@@ -32,23 +66,25 @@ class ForestPhenotyper():
         self.bh_fdr(forest=self.forest, q=q)
 
     def append_edits(self):
-        self.forest.traverse(func=self.append_node_editing)
+        self.forest.traverse(func=self._append_node_editing)
+        self.edits_appended: bool = True
 
-    def append_node_editing(self, node: MotifNode) -> None:
+    def _append_node_editing(self, node: MotifNode) -> None:
+        node.avg_edit = self._get_avg_edit(node.seqs)
+
         J = node.seqs['mle'].shape[0]
-        if J == 0:
-            node.avg_edit = np.nan
-            node.var_edit = np.nan
-            return
-        if J == 1:
-            node.avg_edit = node.seqs['mle'].iloc[0]
-            node.var_edit = np.nan
-            return
-        node.avg_edit = node.seqs['mle'].sum() / J
         node.var_edit = (
-            (1 / (J - 1))
-            * ((node.seqs['mle'] - node.avg_edit)**2).sum()
+            (1 / (J - 1) *
+            ((node.seqs['mle'] - node.avg_edit)**2).sum()
         )
+
+    def _get_avg_edit(seqs: pd.DataFrame) -> float:
+        J = seqs['mle'].shape[0]
+        if J == 0:
+            return 0
+        if J == 1:
+            return seqs['mle'].iloc[0]
+        return seqs['mle'].sum() / J
 
     def append_edits_bb(
         self,
