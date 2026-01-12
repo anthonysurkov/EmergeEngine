@@ -8,6 +8,7 @@ from collections import defaultdict, Counter, deque
 from collections.abc import Iterable
 from typing import Optional
 import re
+from tqdm.auto import tqdm
 from emerge_data import EmergeHandler, MotifNode
 from emerge_forest import MotifForest
 
@@ -76,8 +77,6 @@ class EmergeBPE(EmergeHandler):
 
         self.merges = {}
         self.global_ranks = {}
-        self.kmer_ranks = {}
-        self.kmer_bins = defaultdict(list)
         self.counts = Counter()
 
     def encode(self, vocab_size: int = 1000) -> None:
@@ -88,57 +87,9 @@ class EmergeBPE(EmergeHandler):
         token_ids = self._corpus_to_token_ids(corpus)
 
         token_ids = self._learn_merges(token_ids, vocab_size)
-        self._assign_kmer_ranks()
 
-        self.counts = self._count_kmers(self.df['5to3'], self.kmax)
         if not self.merges:
             warnings.warn('no merges made in encode()')
-
-    def to_forest(self) -> MotifForest:
-        nodes: dict[int, MotifNode] = {}
-
-        def get_node(node_id: int) -> MotifNode:
-            if node_id not in nodes:
-                nodes[node_id] = MotifNode(
-                    node_id = node_id,
-                    motif_seq = self.vocab[node_id]
-                )
-            return nodes[node_id]
-
-        base_pat = re.compile(r'[ACGU]\d+$') # curiously, it seems there exist
-        for tid, tok in self.vocab.items():  # nucleotide tokens that are
-            if base_pat.fullmatch(tok):      # enriched but never participate
-                get_node(tid)    # in merges. so, this loop is not redundant.
-
-        for (left_id, right_id), parent_id in self.merges.items():
-            parent = get_node(parent_id)
-            left = get_node(left_id)
-            right = get_node(right_id)
-
-            left.add_parent(parent)
-            right.add_parent(parent)
-
-            left.motif_seq = self.vocab[left_id]
-            right.motif_seq = self.vocab[right_id]
-            parent.motif_seq = self.vocab[parent_id]
-
-            left.seqs = self.get_motif_seqs(left.motif_seq)
-            right.seqs = self.get_motif_seqs(right.motif_seq)
-            parent.seqs = self.get_motif_seqs(parent.motif_seq)
-
-            parent.rank = self.kmer_ranks.get(parent_id)
-            parent.prevalence = len(parent.seqs)
-            left.prevalence = len(left.seqs)
-            right.prevalence = len(right.seqs)
-
-        all_children = {c for (l, r) in self.merges for c in (l, r)}
-
-        roots = [
-            get_node(pid)
-            for (l, r), pid in self.merges.items()
-            if pid not in all_children
-        ]
-        return MotifForest(roots, self.df)
 
     def _build_corpus(self) -> list[str]:
         corpus: list[str] = []
@@ -158,13 +109,20 @@ class EmergeBPE(EmergeHandler):
     ) -> list[int]:
         global_rank = 0
 
-        for new_id in range(len(self.vocab), vocab_size):
+        # for tqdm progress bar
+        start = len(self.vocab)
+        target = vocab_size
+        total_merges = max(0, target - start)
+        pbar = tqdm(total=total_merges, desc='BPE merges', unit='tok')
+
+        for new_id in range(start, target):
             pair_id = self._find_freq_pair(
                 token_ids=token_ids,
                 vocab=self.vocab,
                 mode='most'
             )
             if pair_id is None:
+                pbar.update(target - pbar.n)
                 break
             p0, p1 = pair_id
             merged_token = self.vocab[p0] + self.vocab[p1]
@@ -177,14 +135,60 @@ class EmergeBPE(EmergeHandler):
             self.global_ranks[(p0, p1)] = global_rank
 
             k = sum(ch in self.base_chars for ch in merged_token)
-            self.kmer_bins[k].append(new_id)
 
+            pbar.update(1)
+
+        pbar.close()
         return token_ids
 
-    def _assign_kmer_ranks(self) -> None:
-        for k, ids in self.kmer_bins.items():
-            for i, tid in enumerate(ids, start=1):
-                self.kmer_ranks[tid] = i
+    def to_forest(self) -> MotifForest:
+        nodes: dict[int, MotifNode] = {}
+
+        def make_node(node_id: int) -> MotifNode:
+            if node_id not in nodes:
+                nodes[node_id] = MotifNode(
+                    node_id = node_id,
+                    motif_seq = self.vocab[node_id]
+                )
+            return nodes[node_id]
+
+        base_pat = re.compile(r'[ACGU]\d+$')
+        for tid, tok in self.vocab.items():
+            if base_pat.fullmatch(tok):
+                nd = make_node(tid)
+                nd.motif_seq = tok
+                nd.seqs = self.get_motif_seqs(tok)
+                nd.prevalence = len(nd.seqs)
+
+        total = len(self.merges.items())
+        pbar = tqdm(total=total, desc='Forest gen', unit='node')
+        for (left_id, right_id), child_id in self.merges.items():
+            child = make_node(child_id)
+            left = make_node(left_id)
+            right = make_node(right_id)
+
+            child.add_parent(left)
+            child.add_parent(right)
+
+            left.motif_seq = self.vocab[left_id]
+            right.motif_seq = self.vocab[right_id]
+            child.motif_seq = self.vocab[child_id]
+
+            left.seqs = self.get_motif_seqs(left.motif_seq)
+            right.seqs = self.get_motif_seqs(right.motif_seq)
+            child.seqs = self.get_motif_seqs(child.motif_seq)
+
+            child.prevalence = len(child.seqs)
+            left.prevalence = len(left.seqs)
+            right.prevalence = len(right.seqs)
+
+            pbar.update(1)
+
+        pbar.close()
+        all_children = {c for (l, r) in self.merges for c in (l, r)}
+
+        roots = [nd for nd in nodes.values() if len(nd.parents) == 0]
+        return MotifForest(roots, self.df)
 
     def _find_freq_pair(
         self,
@@ -242,18 +246,4 @@ class EmergeBPE(EmergeHandler):
             else:
                 replaced.append(current)
         return replaced
-
-    @staticmethod
-    def _count_kmers(
-        seqs: Iterable[str],
-        kmax: int
-    ) -> Counter:
-        counts = Counter()
-        for seq in seqs:
-            tokens = [f"{char}{i}" for i, char in enumerate(seq)]
-            for k in range(2, kmax + 1):
-                for i in range(len(tokens) - k + 1):
-                    kmer = "".join(tokens[i:i+k])
-                    counts[kmer] += 1
-        return counts
 
