@@ -1,173 +1,224 @@
 #emerge_phenotype.py
 from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional
 
-import warnings
 import pandas as pd
 import numpy as np
-from scipy.stats import binomtest, betabinom
+from collections import defaultdict
+from numpy.typing import NDArray
+from scipy.stats import binomtest, betabinom, permutation_test
 from scipy.optimize import minimize
-from emerge_data import MotifNode
+
+from emerge_data import MotifNode, MotifEdge
 from emerge_forest import MotifForest
 
-class ForestPhenotyper():
-    def __init__(
-        self,
-        forest: MotifForest,
-    ):
-        if not isinstance(forest, MotifForest):
-            raise ValueError(
-                'arg `forest` must be a MotifForest. '
-                f'got: {type(forest)}'
-            )
+def bh_fdr(pvals: NDArray[np.float64], q: float = 0.05) -> Optional[float]:
+    pvals = pvals[np.isfinite(pvals)]
+    m = pvals.size
+    if m == 0:
+        return None
+
+    order = np.argsort(pvals)
+    sorted_p = pvals[order]
+
+    thresholds = q * np.arange(1, m + 1) / m
+    ok = sorted_p <= thresholds
+    if not ok.any():
+        return None
+
+    k = np.max(np.where(ok)[0])
+    cutoff = float(sorted_p[k])
+
+    return cutoff
+
+# add capability for different type of pvals later
+# add 5to3, mle col support later
+class ForestEdges:
+    def __init__(self, forest: MotifForest, q: float = 0.05) -> None:
         self.forest = forest
-        self.edits_appended: bool = False
+        self.q = q
 
-    def append_edits_edgewise(self):
-        self.forest.traverse(func=_compute_deltas)
+    @staticmethod
+    def _perm_pval(
+        X: NDArray[np.float64],
+        Y: NDArray[np.float64],
+        *,
+        n_resamples: int = 1000,
+        seed: int = 0
+    ) -> float:
 
-    # delta := Y_S(v) - Y_S(k), Y := avg edit. see p.123 of notebook
-    def _append_node_deltas(self):
-        # encompass _compute_deltas(self) in this function. have it act on one
-        # node. use append_edits_edgewise to traverse forest and compute
-        # deltas for all. then, extend to do permutation p-vals in one pass,
-        # instead of two traversals. 11:55am
+        if X.size < 2 or Y.size < 2:
+            return np.nan
+        def stat(X, Y):
+            return float(np.mean(X) - np.mean(Y))
 
-    def _compute_deltas(self):
-        if not self.edits_appended:
-            self.append_edits()
-        for node in forest:
-            if len(node.parents) != 2:
-                seq = node.motif_seq
-                warnings.warn(
-                    'length of parent is not 2 for node with seq {seq}'
+        res = permutation_test(
+            data=(X, Y),
+            statistic=stat,
+            permutation_type='independent',
+            alternative='greater',
+            n_resamples=n_resamples,
+            random_state=seed,
+            vectorized=False
+        )
+        return float(res.pvalue)
+
+    # change 'mle' and '5to3' to be seq_col, edit_col args from EmergeHandler
+    @staticmethod
+    def _get_not_child_edits(
+        child: MotifNode,
+        parent: MotifNode
+    ) -> NDArray[np.float64]:
+        child_seqs = set(child.seqs['5to3'])
+        mask = ~parent.seqs['5to3'].isin(child_seqs)
+        return parent.seqs.loc[mask, 'mle'].to_numpy(dtype=float)
+
+    def _compute_pval(self, child: MotifNode, parent: MotifNode) -> float:
+        child_edits = child.seqs['mle'].to_numpy(dtype=float)
+        not_child_edits = self._get_not_child_edits(child, parent)
+        return self._perm_pval(X=child_edits, Y=not_child_edits)
+
+    def compute_pvals(self, with_canopy: bool = True) -> None:
+        for edge in self.forest.iter_edges(with_canopy=with_canopy):
+            pval = self._compute_pval(edge.child, edge.parent)
+            edge.pval = pval
+
+    # sp = supported positive
+    def assign_sp(self, with_canopy: bool = True) -> None:
+        p_list = []
+        for e in self.forest.iter_edges(with_canopy=with_canopy):
+            if not hasattr(e, 'pval'):
+                raise RuntimeError(
+                    'Edge p-values not computed; run compute_pvals() first.'
                 )
-            l_parent, r_parent = node.parents
-            # K := S(p) \ S(v), S(x) := seqs matching restriction x. see p. 123
-            v_seqs = set(node.seqs)
-            l_seqs = l_parent.seqs
-            r_seqs = r_parent.seqs
+                p_list.append(e.pval)
+        pvals = np.array(p_list, dtype=float)
+        cutoff = bh_fdr(pvals, q=self.q)
+        for edge in self.forest.iter_edges(with_canopy=with_canopy):
+            edge.sp = (cutoff is not None) and (edge.pval <= cutoff)
 
-            l_K = [seq for seq in l_seqs if seq not in v_seqs]
-            r_K = [seq for seq in r_seqs if seq not in v_seqs]
-            l_K_edit = self._get_avg_edit(l_K)
-            r_K_edit = self._get_avg_edit(r_K)
+# add capability for different type of pvals later
+# currently deprecating append_edits_bb (beta-binomial modeling of node editing)
+# please see archived emerge_phenotype for old beta-binomial code
+class ForestNodes:
+    def __init__(self, forest: MotifForest, q: float = 0.05) -> None:
+        self.forest = forest
+        self.q = q
 
-            node.l_delta = node.avg_edit - l_K_edit
-            node.r_delta = node.avg_edit - r_K_edit
+    def _compute_edit(self, node: MotifNode) -> float:
+        if node.seqs is None or node.seqs.empty:
+            return 0.0
+        mle = node.seqs['mle'].to_numpy(dtype=float)
+        if mle.size == 0:
+            return 0.0
+        return float(np.mean(mle))
+
+    # in the future maybe make sure motif_len is actually "number of
+    # constrained positions;" it isn't now, strictly. just taking length of
+    # motif sequence. Z, for example, is unconstrained and shouldn't contribute
+    # to 0.25^L
+    def _compute_pval(self, node: MotifNode) -> float:
+        if node.seqs is None:
+            return np.nan
+        p0 = 0.25 ** node.motif_len
+        k = int(node.seqs.shape[0])
+        n = int(self.forest.df_len)
+        res = binomtest(k=k, n=n, p=p0, alternative='greater')
+        return float(res.pvalue)
+
+    def compute_edits(self, with_canopy: bool = True) -> None:
+        for node in self.forest.flatten(with_canopy=with_canopy):
+            node.edit = self._compute_edit(node)
+
+    def compute_pvals(self, with_canopy: bool = True) -> None:
+        for node in self.forest.flatten(with_canopy=with_canopy):
+            pval = self._compute_pval(node)
+            node.pval = pval
+
+    # sp = supported positive
+    def assign_sp(self, with_canopy: bool = True) -> None:
+        pvals = np.array(
+            [n.pval for n in self.forest.flatten(with_canopy=with_canopy)],
+            dtype=float
+        )
+        cutoff = bh_fdr(pvals, q=self.q)
+        for node in self.forest.flatten(with_canopy=with_canopy):
+            node.sp = (cutoff is not None) and (node.pval <= cutoff)
+
+# need to add: depth statistic in BPE merger
+# forest.iter_edges() method
+class ForestPruner:
+    def __init__(self, forest: MotifForest, q: float = 0.05) -> None:
+        self.forest = forest
+        self.over_nodes = ForestNodes(forest=forest, q=q)
+        self.over_edges = ForestEdges(forest=forest, q=q)
+
+    def prune_by_delta(
+        self,
+        with_canopy: bool = True,
+        with_parents: bool = True
+    ) -> None:
+        self.over_edges.compute_pvals(with_canopy=with_canopy)
+        self.over_edges.assign_sp(with_canopy=with_canopy)
+
+        out = defaultdict(list)
+        for e in self.forest.iter_edges(with_canopy=with_canopy):
+            out[id(e.parent)].append(e)
+
+        keep: set[int] = set()
+        nodes = list(self.forest.flatten(with_canopy=with_canopy))
+
+        for node in nodes:
+            edges = out.get(id(node), [])
+            s = sum(bool(getattr(e, 'sp', False)) for e in edges)
+
+            node.motif_state = 2 if s >= 2 else 1 if s == 1 else 0
+            if node.motif_state > 0:
+                keep.add(id(node))
+
+        if with_parents:
+            for node in nodes:
+                if id(node) in keep:
+                    cur = getattr(node, 'parent', None)
+                    while cur is not None:
+                        keep.add(id(cur))
+                        cur = getattr(cur, 'parent', None)
+
+        for node in nodes:
+            if id(node) in keep:
+                continue
+            parent = getattr(node, 'parent', None)
+            if parent is None or id(parent) in keep:
+                self.forest.prune(node)
 
     def prune_by_enrichment(
         self,
-        q: float = 0.05
+        with_canopy: bool = True,
+        with_parents: bool = True
     ) -> None:
-        def _compute_p(node: MotifNode):
-            node.p = self._binom_test(node=node)
+        self.over_nodes.compute_pvals(with_canopy=with_canopy)
+        self.over_nodes.assign_sp(with_canopy=with_canopy)
 
-        self.forest.traverse(func=_compute_p)
-        self.bh_fdr(forest=self.forest, q=q)
+        keep: set[int] = set()
+        nodes = list(self.forest.flatten(with_canopy=with_canopy))
 
-    def append_edits(self):
-        self.forest.traverse(func=self._append_node_editing)
-        self.edits_appended: bool = True
+        for node in nodes:
+            if getattr(node, 'sp', False):
+                keep.add(id(node))
 
-    def _append_node_editing(self, node: MotifNode) -> None:
-        node.avg_edit = self._get_avg_edit(node.seqs)
-
-        J = node.seqs['mle'].shape[0]
-        node.var_edit = (
-            (1 / (J - 1) *
-            ((node.seqs['mle'] - node.avg_edit)**2).sum()
-        )
-
-    def _get_avg_edit(seqs: pd.DataFrame) -> float:
-        J = seqs['mle'].shape[0]
-        if J == 0:
-            return 0
-        if J == 1:
-            return seqs['mle'].iloc[0]
-        return seqs['mle'].sum() / J
-
-    def append_edits_bb(
-        self,
-        node: MotifNode,
-        correct_if_bb_bad: bool = True
-    ) -> None:
-        a, b, res = self._fit_beta_binom(node)
-        if not res.success:
-            if correct_if_bb_bad:
-                self.append_node_editing(node)
-                return
-            warnings.warn(
-                f'Beta-binomial fit did not converge for node ID {node.node_id}'
-                f' / motif {node.motif_seq}, and correct_if_bb_bad behavior'
-                f' is off. Appending node seqs below:\n {node.seqs}'
-            )
-        node.avg_edit = a / (a + b)
-        node.var_edit = (a * b) / (((a + b)**2) * (a + b + 1))
-
-    def bh_fdr(
-        self,
-        forest: MotifForest,
-        q: float = 0.05
-    ) -> None:
-        # Benjamini-Hochberg false discovery rate control
-        nodes = sorted(self.forest.flatten(), key=lambda nd: nd.node_id)
-        if not nodes:
-            return
-
-        pvals = np.asarray([node.p for node in nodes], dtype=float)
-        m = pvals.size
-
-        order = np.argsort(pvals)
-        sorted_p = pvals[order]
-
-        thresholds = q * np.arange(1, m+1) / m
-        below = sorted_p <= thresholds
-
-        if not np.any(below):
-            # nothing survives; prune everything
+        if with_parents:
             for node in nodes:
+                if id(node) in keep:
+                    cur = getattr(node, 'parent', None)
+                    while cur is not None:
+                        keep.add(id(cur))
+                        cur = getattr(cur, 'parent', None)
+
+        for node in nodes:
+            if id(node) in keep:
+                continue
+            parent = getattr(node, 'parent', None)
+            if parent is None or id(parent) in keep:
                 self.forest.prune(node)
-            return
-
-        k = np.max(np.where(below)[0])
-        cutoff = sorted_p[k]
-        print(f'FDR p-value cutoff: {cutoff}')
-
-        for node, p in zip(nodes, pvals):
-            if p > cutoff:
-                self.forest.prune(node)
-
-    def _binom_test(self, node: MotifNode) -> float:
-        p0 = 0.25 ** node.motif_len
-        k = node.seqs.shape[0]
-        res = binomtest(k=k, n=self.forest.df_len, p=p0, alternative='greater')
-        return res.pvalue # might want to expose rest of res later
-
-    @staticmethod
-    def _fit_beta_binom(
-        node: MotifNode,
-        alpha0: float = 1.0,
-        beta0: float = 1.0
-    ):
-        k = np.asarray(node.seqs['k'])
-        n = np.asarray(node.seqs['n'])
-
-        def _neg_loglik(params):
-            a, b = params
-            if a <= 0 or b <= 0:
-                return 1e9
-            ll = betabinom.logpmf(k, n, a, b)
-            if not np.all(np.isfinite(ll)):
-                return 1e9
-            return -np.sum(ll)
-
-        res = minimize(
-            _neg_loglik,
-            x0=np.array([alpha0, beta0]),
-            method="L-BFGS-B",
-            bounds=[(1e-6,None), (1e-6,None)]
-        )
-
-        alpha_hat, beta_hat = res.x
-        return alpha_hat, beta_hat, res
 
