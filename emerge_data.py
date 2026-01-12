@@ -264,31 +264,67 @@ class EmergeHandler:
     def _matches_mask(seq: str, mask: str) -> bool:
         return all(m == "X" or s == m for s, m in zip(seq, mask))
 
-@dataclass(eq=False)
+@dataclass
+class MotifEdge:
+    parent: MotifNode
+    child: MotifNode
+    delta: float
+    pval: float
+    sp: bool = False
+
+    @property
+    def parent_id(self) -> int:
+        return id(self.parent)
+
+    @property
+    def child_id(self) -> int:
+        return id(self.child)
+
+# eq=False
 class MotifNode:
-    motif_seq: str = None
-    node_id: int = None
+    def __init__(
+        self,
+        motif_seq: str = None,
+        node_id: int = None,
+        seqs: Optional[pd.DataFrame] = None,
+        rank: Optional[int] = None,
+        prevalence: Optional[int] = None,
+        edit: Optional[float] = None,
+        special_chars: Optional[list[str]] = None
+    ):
+        self.motif_seq = motif_seq
+        self.node_id = node_id
+        self.seqs = seqs
+        self.rank = rank
+        self.prevalence = prevalence
+        self.edit = edit
 
-    seqs: Optional[pd.DataFrame] = None
-    rank: Optional[int] = None
-    prevalence: Optional[int] = None
-    avg_edit: Optional[float] = None
-    var_edit: Optional[float] = None
+        self.motif_state = None
+        self.pval = None
+        self.sp = None
 
-    parents: list[MotifNode] = field(default_factory=list)
-    children: list[MotifNode] = field(default_factory=list)
+        self.parents = []
+        self.children = []
 
-    def __post_init__(self):
-        if self.motif_seq is None:
+        sc = set(special_chars) if special_chars if not None else {'Z'}
+
+        if motif_seq is None:
             self.base_chars = []
             self.motif_len = 0
-            return
-        self.base_chars = sorted(
-            {ch for ch in self.motif_seq if not ch.isdigit()}
+        else:
+            self.base_chars = sorted({
+                ch for ch in self.motif_seq
+                if (not ch.isdigit()) and (ch not in sc)
+            })
+            self.motif_len = sum((ch in self.base_chars) for ch in motif_seq)
+
+    def __repr__(self):
+        J = 0 if self.seqs is None else len(self.seqs)
+        return (
+            f'MotifNode(id={self.node_id}, motif={self.motif_seq}, '
+            f'J={J}, parents={len(self.parents)}, children={len(self.children)}'
         )
-        self.motif_len = len(
-            [ch for ch in self.motif_seq if ch in self.base_chars]
-        )
+
 
     def add_child(self, child: MotifNode) -> None:
         if child not in self.children:

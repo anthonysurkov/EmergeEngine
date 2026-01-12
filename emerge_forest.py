@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-from typing import Optional
 import re
+from typing import Optional, Literal, Callable, Any
+from collections.abc import Iterable
 from scipy.stats import binomtest
+from tqdm.auto import tqdm
 
 import networkx as nx
 from pyvis.network import Network
@@ -12,17 +14,19 @@ from matplotlib import cm
 from matplotlib import colors as mcolors
 from networkx.drawing.nx_agraph import graphviz_layout
 
-from emerge_data import EmergeHandler, MotifNode
+from emerge_data import EmergeHandler, MotifNode, MotifEdge
 
 class MotifForest(EmergeHandler):
     def __init__(
         self,
-        forest: list[MotifNode],
+        roots: list[MotifNode],
         df_emerge: Optional[pd.DataFrame],
+        *,
         seq_col: str = '5to3',
         n_col: str = 'n',
         k_col: str = 'k',
-        to_rna: bool = True
+        to_rna: bool = True,
+        build_canopy: bool = True
     ) -> None:
         if df_emerge is not None:
             super().__init__(
@@ -32,23 +36,27 @@ class MotifForest(EmergeHandler):
                 k_col = k_col,
                 to_rna = to_rna
             )
-        if not forest:
-            raise TypeError(
-                'arg `forest` cannot neither be an empty list nor None.'
-            )
-        for node in forest:
+        if not roots:
+            raise ValueError('arg `roots` cannot be None')
+        for node in roots:
             if not isinstance(node, MotifNode):
                 raise TypeError(
                     'arg `forest` must be composed of MotifNode instances. '
                     f'found: {type(node)}'
                 )
-        self.forest = forest
-        self.canopy = None
 
-    def __iter__(self):
-        return iter(self.forest.flatten())
+        self.roots = roots
+        self.canopy = ForestCanopy(self) if build_canopy else None
 
-    def with_canopy(self):
+    def __iter__(self) -> Iterator[MotifNode]:
+        return iter(self.flatten())
+
+    def iter_edges(self) -> Iterator[MotifEdge]:
+        for child in self.flatten(with_canopy=with_canopy):
+            for parent in getattr(child, 'parents', []) or []:
+                yield MotifEdge(parent=parent, child=child)
+
+    def with_canopy(self) -> MotifForest:
         self.canopy = ForestCanopy(self)
         return self
 
@@ -56,61 +64,82 @@ class MotifForest(EmergeHandler):
         self,
         visited: Optional[set] = None,
         func: Optional[Callable[..., Any]] = None,
-        params: Optional[list[Any]] = None
+        params: Optional[list[Any]] = None,
+        with_canopy: bool = True
     ) -> list:
-        if self.forest is None:
-            raise ValueError(
-                'arg `forest` cannot be None. try using build_forest method'
-            )
+        if self.roots is None:
+            raise ValueError('arg `roots` cannot be None')
         if visited is None:
             visited = set()
         if params is None:
             params = []
 
         results: list[Any] = []
+        nodes = self.flatten(with_canopy=with_canopy)
 
-        def _visit(node: MotifNode) -> None:
-            if node in visited:
-                return
-            visited.add(node)
+        desc = f'Traversing with {func.__name__}' if func else f'Traversing'
+        for node in tqdm(nodes, desc=desc, unit='node'):
             if func is not None:
-                result = func(node, *params)
-                results.append(result)
-            for child in node.children:
-                _visit(child)
-
-        for node in self.forest:
-            _visit(node)
+                results.append(func(node, *params))
 
         return results
 
-    def flatten(self, with_canopy: bool = True) -> set[MotifNode]:
-        visited: set[MotifNode] = set()
-        self.traverse(visited=visited, func=None)
-        if with_canopy and self.canopy is not None:
-            return visited | set(self.canopy)
-        return visited
+    def flatten(self, with_canopy: bool = True) -> list[MotifNode]:
+        if self.roots is None:
+            raise ValueError('arg `roots` cannot be None')
+
+        out: list[MotifNode] = []
+        seen: set[int] = set()
+        stack = list(self.roots)
+
+        while stack:
+            node = stack.pop()
+            nid = id(node)
+            if nid in seen:
+                continue
+            seen.add(nid)
+            out.append(node)
+            stack.extend(getattr(node, 'children', []))
+
+        if with_canopy:
+            if self.canopy is None:
+                self.canopy = ForestCanopy(self)
+            for node in self.canopy:
+                nid = id(node)
+                if nid not in seen:
+                    seen.add(nid)
+                    out.append(node)
+
+        return out
 
     def prune(self, node: MotifNode) -> None:
-        if not self.forest:
-            raise ValueError(
-                'arg `forest` cannot be None. Try giving me a forest'
-            )
-        if not node.parents and node in self.forest:
-            idx = self.forest.index(node)
-            self.forest[idx:idx+1] = node.children
+        if not self.roots:
+            raise ValueError('arg `roots` cannot be None')
 
-        for parent in node.parents:
+        nodes = self.flatten()
+        parents = list(node.parents)
+        children = list(node.children)
+
+        if not parents and node in nodes:
+            i = self.roots.index(node)
+            self.roots[i:i+1] = node.children
+            return
+
+        for parent in parents:
             new_children = []
             for child in parent.children:
                 if child is node:
-                    new_children.extend(node.children)
+                    new_children.extend(children)
                 else:
                     new_children.append(child)
             parent.children = new_children
 
         for child in node.children:
-            child.parents = [p for p in node.parents]
+            new_parents = [p for p in child.parents if p is not node]
+            for parent in parents:
+                if parent not in new_parents:
+                    new_parents.append(parent)
+            child.parents = new_parents
 
         node.children = []
         node.parents = []
@@ -120,134 +149,169 @@ class MotifForest(EmergeHandler):
         outfile: str = 'forest.html',
         title: str | None = None,
         subtitle: str | None = None,
-        min_length: int = 0,
+        *,
+        color_by: Literal['editing', 'motif_status'] = 'editing',
+        status_attr: str = 'motif_state',
+        with_canopy: bool = True,
+        open_browser: bool = True,
+        prog: str = 'dot',
     ) -> None:
-        if not self.forest:
-            raise ValueError(
-                f'arg `forest` cannot be None. try using build_forest method'
-            )
+        if not self.roots:
+            raise ValueError('arg `forest` cannot be None/empty.')
 
-        nodes = list(self.flatten())
-        min_length *= 2
-        nodes = [
-            nd for nd in nodes
-            if len(nd.motif_seq) > min_length
-        ]
-
+        nodes = self.flatten(with_canopy=with_canopy)
+        nodes = [nd for nd in nodes if nd.motif_seq is not None]
         if not nodes:
-            raise ValueError(
-                'No motifs to render (all were length-2 or pruned).'
-            )
+            raise ValueError('no motifs to render after filtering for seq')
 
-        all_nodes: dict[str, MotifNode] = {
-            nd.motif_seq: nd for nd in nodes
-        }
+        # de-duplicate nodes
+        all_nodes: dict[str, MotifNode] = {}
+        for nd in nodes:
+            key = nd.motif_seq
+            if key in all_nodes and all_nodes[key] is not nd:
+                continue
+            all_nodes[key] = nd
 
         G = nx.DiGraph()
+        G.add_nodes_from(all_nodes.keys())
+
         for nd in all_nodes.values():
-            for child in nd.children:
-                if child.motif_seq in all_nodes:
-                    G.add_edge(child.motif_seq, nd.motif_seq)
+            for child in getattr(nd, 'children', []):
+                cseq = getattr(child, 'motif_seq', None)
+                if cseq in all_nodes:
+                    G.add_edge(nd.motif_seq, cseq)
 
-        if len(G.edges()) == 0:
-            raise ValueError('Empty graph after filtering motifs.')
+        # layout: graphviz when possible; otherwise fallback
+        try:
+            if G.number_of_edges() > 0:
+                pos = graphviz_layout(G, prog=prog)
+            else:
+                pos = nx.spring_layout(G, seed=0)
+        except Exception:
+            pos = nx.spring_layout(G, seed=0)
 
-        active_seqs = set(G.nodes())
-        all_nodes = {
-            seq: nd for seq, nd in all_nodes.items()
-            if seq in active_seqs
+        # set up coloring
+        norm = None
+        cmap = None
+        status_palette = {
+            0: '#bdbdbd',  # pruned/none (if it slips in)
+            1: '#6baed6',  # context-ish
+            2: '#31a354',  # true-ish
         }
-        if not all_nodes:
-            raise ValueError('No connected motifs left after filtering.')
 
-        edit_vals = [
-            nd.avg_edit for nd in all_nodes.values()
-            if getattr(nd, "avg_edit", None) is not None
-        ]
+        if color_by == 'editing':
+            edit_vals = [
+                getattr(nd, 'edit', None)
+                for nd in all_nodes.values()
+                if getattr(nd, 'edit', None) is not None
+                and np.isfinite(getattr(nd, 'edit', None))
+            ]
+            if edit_vals:
+                vals = np.asarray(edit_vals, dtype=float)
+                vmin = np.percentile(vals, 10)
+                vmax = np.percentile(vals, 95)
+                if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
+                    norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+                    cmap = cm.get_cmap('Reds')
 
-        if edit_vals:
-            vals = np.asarray(edit_vals, dtype=float)
-
-            vmin = np.percentile(vals, 10)
-            vmax = np.percentile(vals, 95)
-
-            norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=True)
-            cmap = cm.get_cmap("Reds")
-        else:
-            norm = None
-            cmap = None
-
-        pos = graphviz_layout(G, prog="dot")
-
-        net = Network(
-            height="750px",
-            width="100%",
-            directed=True,
-            notebook=False
+        # sizes
+        prevs = np.array([
+            float(getattr(nd, 'prevalence', 1) or 1)
+            for nd in all_nodes.values()
+            ], dtype=float
         )
-        net.toggle_physics(False)
-        net.set_edge_smooth("straight")
-
-        prevs = np.array([nd.prevalence for nd in all_nodes.values()], float)
-        lo, hi = np.percentile(prevs, [5, 95])
+        lo, hi = np.percentile(prevs, [5, 95]) if prevs.size else (1.0, 1.0)
         sizes_clipped = np.clip(prevs, lo, hi)
         sizes_scaled = np.sqrt(sizes_clipped)
-        node_sizes = 10 + 40 * (sizes_scaled - sizes_scaled.min()) / (
-            sizes_scaled.max() - sizes_scaled.min() + 1e-9
-        )
+        denom = (sizes_scaled.max() - sizes_scaled.min()) + 1e-9
+        node_sizes = 10 + 40 * (sizes_scaled - sizes_scaled.min()) / denom
         size_map = dict(zip(all_nodes.keys(), node_sizes))
 
+        # pyvis render
+        net = Network(
+            height='750px', width='100%', directed=True, notebook=False
+        )
+        net.toggle_physics(False)
+        net.set_edge_smooth('straight')
+
+        # add nodes with color
         for seq, nd in all_nodes.items():
-            p_raw = getattr(nd, "p", None)
-            p_str = f"{p_raw:.4f}" if p_raw is not None else "–"
+            p_raw = getattr(nd, 'pval', None)
+            p_str = (
+                f'{p_raw:.4f}'
+                if isinstance(p_raw, (int, float))
+                and np.isfinite(p_raw)
+                else '–'
+            )
 
-            avg = getattr(nd, "avg_edit", None)
-            var = getattr(nd, "var_edit", None)
-            prev = getattr(nd, "prevalence", None)
-            if prev is None or prev <= 0:
-                prev = 1
+            avg = getattr(nd, 'edit', None)
+            prev = getattr(nd, 'prevalence', None)
+            prev = (
+                int(prev)
+                if isinstance(prev, (int, np.integer))
+                and prev > 0
+                else 1
+            )
 
-            rank = getattr(nd, "rank", None)
-            rank_str = rank if rank is not None else "–"
+            status_val = getattr(nd, status_attr, None)
 
-            color = "#cccccc"
-            if cmap is not None and avg is not None:
-                rgba = cmap(norm(avg))
-                color = mcolors.to_hex(rgba)
+            if color_by == 'motif_status':
+                color = (status_palette.get(
+                    int(status_val)
+                    if status_val is not None
+                    else 0, '#bdbdbd'
+                ))
+            else:
+                color = '#cccccc'
+                if (
+                    cmap is not None
+                    and norm is not None
+                    and avg is not None
+                    and np.isfinite(avg)
+                ):
+                    color = mcolors.to_hex(cmap(norm(float(avg))))
 
-            edit_str = f"{avg:.3f}" if avg is not None else "–"
-            stdev_str = f"{np.sqrt(var):.3f}" if var is not None else "–"
+            edit_str = (
+                f'{avg:.3f}'
+                if avg is not None
+                and np.isfinite(avg)
+                else '–'
+            )
+            status_str = status_val if status_val is not None else "–"
 
             node_title = (
-                f"Seq: {seq}, "
-                f"Rank: {rank_str}, "
-                f"Count: {prev}, "
-                f"Edit avg: {edit_str}, "
-                f"Edit stdev: {stdev_str}, "
-                f"p-value: {p_str}"
+                f'Seq: {seq}, '
+                f'Count: {prev}, '
+                f'Edit avg: {edit_str}, '
+                f'p-val: {p_str}, '
+                f'{status_attr}: {status_str}'
             )
+
             net.add_node(
                 seq,
                 label=seq,
                 title=node_title,
                 color=color,
-                size=size_map[seq]
+                size=float(size_map.get(seq, 10.0)),
             )
 
+        # add edges (may be none; that's fine)
         for u, v in G.edges():
             net.add_edge(u, v)
 
-        node_index = {node["id"]: idx for idx, node in enumerate(net.nodes)}
+        # pin positions
+        node_index = {node['id']: idx for idx, node in enumerate(net.nodes)}
         for seq, (x, y) in pos.items():
             if seq in node_index:
                 idx = node_index[seq]
-                net.nodes[idx]["x"] = x
-                net.nodes[idx]["y"] = -y
+                net.nodes[idx]['x'] = float(x)
+                net.nodes[idx]['y'] = float(-y)
 
-        net.write_html(outfile, open_browser=True)
+        net.write_html(outfile, open_browser=open_browser)
 
+        # optional header injection
         if title or subtitle:
-            with open(outfile, "r", encoding="utf-8") as f:
+            with open(outfile, 'r', encoding='utf-8') as f:
                 html = f.read()
 
             section = "<div style='text-align:center; margin-bottom:20px;'>"
@@ -255,14 +319,14 @@ class MotifForest(EmergeHandler):
                 section += f"<h2 style='margin:0;'>{title}</h2>"
             if subtitle:
                 section += (
-                    "<p style='margin:0; font-size:14px; color:#444;'>{}</p>"
-                    .format(subtitle)
+                    f"<p style='margin:0; font-size:14px; "
+                    f"color:#444;'>{subtitle}</p>"
                 )
             section += "</div>"
 
-            html = html.replace("<body>", "<body>" + section, 1)
+            html = html.replace('<body>', '<body>' + section, 1)
 
-            with open(outfile, "w", encoding="utf-8") as f:
+            with open(outfile, 'w', encoding='utf-8') as f:
                 f.write(html)
 
 class ForestCanopy:
@@ -275,15 +339,19 @@ class ForestCanopy:
                 'arg `forest` must be a MotifForest. '
                 f'got: {type(forest)}'
             )
-        self.forest = forest
+        self.roots = forest
         self.canopy = []
         self.generate()
 
     def __iter__(self):
-        return iter(self.canopy)
+        return iter(self.flatten())
+
+    def flatten(self):
+        raise NotImplementedError('implement me pls')
+        # to be implemented
 
     def generate(self, offset: int = 2) -> None:
-        nodes = self.forest.flatten()
+        nodes = self.roots.flatten()
         node_ids = [node.node_id for node in nodes]
 
         while nodes:
@@ -296,14 +364,14 @@ class ForestCanopy:
                     continue
 
                 candidate_seq = this_node.motif_seq + that_node.motif_seq
-                if len(candidate_seq) / 2 > self.forest.seq_len - offset:
+                if len(candidate_seq) / 2 > self.roots.seq_len - offset:
                     continue
 
                 new_node = MotifNode(
                     motif_seq = candidate_seq,
                     node_id = max(node_ids) + 1
                 )
-                new_node.seqs = self.forest.get_motif_seqs(new_node.motif_seq)
+                new_node.seqs = self.roots.get_motif_seqs(new_node.motif_seq)
                 if new_node.seqs is None or new_node.seqs.empty:
                     continue
 
@@ -317,9 +385,6 @@ class ForestCanopy:
                 new_node.add_parent(that_node)
 
                 self.canopy.append(new_node)
-
-    def prune_by_editing(self, q: float = 0.05) -> None:
-        self._bh_fdr(nodes=self.canopy, q=q)
 
     def _compatible(self, token1: str, token2: str) -> bool:
         pos1 = self._token_to_pos(token=token1)
@@ -335,7 +400,7 @@ class ForestCanopy:
 
         pos_set = set(pos_nums)
         return np.array(
-            [1 if i in pos_set else 0 for i in range(0, self.forest.seq_len+1)],
+            [1 if i in pos_set else 0 for i in range(0, self.roots.seq_len+1)],
              dtype=int
         )
 
@@ -347,60 +412,4 @@ class ForestCanopy:
 
         product = arr1 * arr2
         return product.sum() == 0
-
-    # TODO: figure out if this is a legit test; same potential problem as with
-    #       calculating editing rates generally, as currently done in
-    #       ForestPhenotyper
-    @staticmethod
-    def _canopy_bino_test(
-        node1: MotifNode,
-        node2: MotifNode,
-        node12: MotifNode
-    ) -> float:
-        if getattr(node1, 'avg_edit', None) is None:
-            node1.avg_edit = node1.seqs['mle'].mean()
-        if getattr(node2, 'avg_edit', None) is None:
-            node2.avg_edit = node2.seqs['mle'].mean()
-
-        p0 = max([node1.avg_edit, node2.avg_edit])
-        k = int(node12.seqs['k'].sum())
-        n = int(node12.seqs['n'].sum())
-
-        res = binomtest(k=k, n=n, p=p0, alternative='greater')
-        return res.pvalue
-
-    @staticmethod
-    def _bh_fdr(
-        nodes: list[MotifNode],
-        q: float = 0.05
-    ) -> None:
-        # Benjamini-Hochberg false discovery rate control
-        if nodes is None:
-            return
-
-        pvals = np.asarray([node.p for node in nodes], dtype=float)
-        m = pvals.size
-
-        order = np.argsort(pvals)
-        sorted_p = pvals[order]
-
-        thresholds = q * np.arange(1, m+1) / m
-        below = sorted_p <= thresholds
-
-        if not np.any(below):
-            return None
-
-        k = np.max(np.where(below)[0])
-        cutoff = sorted_p[k]
-        print(f'FDR p-value cutoff: {cutoff}')
-
-        for node, p in zip(nodes, pvals):
-            if p > cutoff:
-                nodes.remove(node)
-                for parent in node.parents:
-                    parent.children.remove(node)
-                for child in node.children:
-                    child.parents.remove(node)
-        return nodes
-
 
