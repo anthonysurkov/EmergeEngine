@@ -26,7 +26,7 @@ class MotifForest(EmergeHandler):
         n_col: str = 'n',
         k_col: str = 'k',
         to_rna: bool = True,
-        build_canopy: bool = True
+        lazy_canopy: bool = True
     ) -> None:
         if df_emerge is not None:
             super().__init__(
@@ -38,6 +38,12 @@ class MotifForest(EmergeHandler):
             )
         if not roots:
             raise ValueError('arg `roots` cannot be None')
+
+        self.roots = roots
+        self.canopy = None
+        if not lazy_canopy:
+            self.canopy = ForestCanopy(self)
+
         for node in roots:
             if not isinstance(node, MotifNode):
                 raise TypeError(
@@ -45,13 +51,10 @@ class MotifForest(EmergeHandler):
                     f'found: {type(node)}'
                 )
 
-        self.roots = roots
-        self.canopy = ForestCanopy(self) if build_canopy else None
-
     def __iter__(self) -> Iterator[MotifNode]:
         return iter(self.flatten())
 
-    def iter_edges(self) -> Iterator[MotifEdge]:
+    def iter_edges(self, with_canopy=True) -> Iterator[MotifEdge]:
         for child in self.flatten(with_canopy=with_canopy):
             for parent in getattr(child, 'parents', []) or []:
                 yield MotifEdge(parent=parent, child=child)
@@ -112,11 +115,11 @@ class MotifForest(EmergeHandler):
 
         return out
 
-    def prune(self, node: MotifNode) -> None:
+    def prune(self, node: MotifNode, with_canopy: bool = True) -> None:
         if not self.roots:
             raise ValueError('arg `roots` cannot be None')
 
-        nodes = self.flatten()
+        nodes = self.flatten(with_canopy=with_canopy)
         parents = list(node.parents)
         children = list(node.children)
 
@@ -156,6 +159,18 @@ class MotifForest(EmergeHandler):
         open_browser: bool = True,
         prog: str = 'dot',
     ) -> None:
+
+        nodes = self.flatten(with_canopy=with_canopy)
+        print("nodes:", len(nodes))
+        print("max parents:", max(len(n.parents) for n in nodes))
+        print("max children:", max(len(n.children) for n in nodes))
+        print("parents>=5:", sum(len(n.parents) >= 5 for n in nodes))
+        print("children>=5:", sum(len(n.children) >= 5 for n in nodes))
+
+        seqs = [n.motif_seq for n in nodes if n.motif_seq is not None]
+        print("motif_seq collisions:", len(seqs) - len(set(seqs)))
+
+
         if not self.roots:
             raise ValueError('arg `forest` cannot be None/empty.')
 
@@ -190,6 +205,24 @@ class MotifForest(EmergeHandler):
         except Exception:
             pos = nx.spring_layout(G, seed=0)
 
+
+        xs = np.array([p[0] for p in pos.values()], dtype=float)
+        ys = np.array([p[1] for p in pos.values()], dtype=float)
+
+        xs -= xs.mean() if xs.size else 0.0
+        ys -= ys.mean() if ys.size else 0.0
+
+        scale = max(
+            xs.std()
+            if xs.size else 1.0,
+            ys.std()
+            if ys.size else 1.0, 1e-9
+        )
+        xs = xs / scale * 800
+        ys = ys / scale * 800
+
+        pos = {k: (float(x), float(y)) for k, x, y in zip(pos.keys(), xs, ys)}
+
         # set up coloring
         norm = None
         cmap = None
@@ -220,6 +253,9 @@ class MotifForest(EmergeHandler):
             for nd in all_nodes.values()
             ], dtype=float
         )
+        prevs[~np.isfinite(prevs)] = 1.0
+        prevs[prevs <= 0] = 1.0
+
         lo, hi = np.percentile(prevs, [5, 95]) if prevs.size else (1.0, 1.0)
         sizes_clipped = np.clip(prevs, lo, hi)
         sizes_scaled = np.sqrt(sizes_clipped)
@@ -239,7 +275,7 @@ class MotifForest(EmergeHandler):
             p_raw = getattr(nd, 'pval', None)
             p_str = (
                 f'{p_raw:.4f}'
-                if isinstance(p_raw, (int, float))
+                if isinstance(p_raw, (int, float, np.integer, np.floating))
                 and np.isfinite(p_raw)
                 else '–'
             )
@@ -332,26 +368,30 @@ class MotifForest(EmergeHandler):
 class ForestCanopy:
     def __init__(
         self,
-        forest: MotifForest
+        forest: MotifForest,
+        offset: int = 2
     ):
         if not isinstance(forest, MotifForest):
             raise TypeError(
                 'arg `forest` must be a MotifForest. '
                 f'got: {type(forest)}'
             )
-        self.roots = forest
-        self.canopy = []
+        self.forest = forest
+        self.offset = offset # rename. this is just how much shorter than
+                             # seq_len candidate_seq must be in self.generate()
+        self.canopy = None
         self.generate()
 
     def __iter__(self):
-        return iter(self.flatten())
+        if not self.canopy:
+            self.generate()
+        return iter(self.canopy)
 
-    def flatten(self):
-        raise NotImplementedError('implement me pls')
-        # to be implemented
+    def generate(self) -> None:
+        if not self.canopy:
+            self.canopy = []
 
-    def generate(self, offset: int = 2) -> None:
-        nodes = self.roots.flatten()
+        nodes = self.forest.flatten(with_canopy=False)
         node_ids = [node.node_id for node in nodes]
 
         while nodes:
@@ -364,14 +404,14 @@ class ForestCanopy:
                     continue
 
                 candidate_seq = this_node.motif_seq + that_node.motif_seq
-                if len(candidate_seq) / 2 > self.roots.seq_len - offset:
+                if len(candidate_seq) / 2 > self.forest.seq_len - self.offset:
                     continue
 
                 new_node = MotifNode(
                     motif_seq = candidate_seq,
                     node_id = max(node_ids) + 1
                 )
-                new_node.seqs = self.roots.get_motif_seqs(new_node.motif_seq)
+                new_node.seqs = self.forest.get_motif_seqs(new_node.motif_seq)
                 if new_node.seqs is None or new_node.seqs.empty:
                     continue
 
@@ -391,6 +431,15 @@ class ForestCanopy:
         pos2 = self._token_to_pos(token=token2)
         return self._compatible_by_pos(arr1=pos1, arr2=pos2)
 
+    @staticmethod
+    def _compatible_by_pos(arr1: np.ndarray, arr2: np.ndarray) -> bool:
+        assert np.isin(arr1, [0, 1]).all(), 'arr1 must be 0/1'
+        assert np.isin(arr2, [0, 1]).all(), 'arr2 must be 0/1'
+        assert arr1.size == arr2.size, 'arrays must be same size'
+
+        product = arr1 * arr2
+        return product.sum() == 0
+
     def _token_to_pos(self, token: str) -> np.ndarray:
         assert isinstance(token, str), 'token must be str'
 
@@ -400,16 +449,27 @@ class ForestCanopy:
 
         pos_set = set(pos_nums)
         return np.array(
-            [1 if i in pos_set else 0 for i in range(0, self.roots.seq_len+1)],
+            [1 if i in pos_set else 0 for i in range(0, self.forest.seq_len+1)],
              dtype=int
         )
 
+    #uh figure out what this does lol. before pushing, preferably
     @staticmethod
-    def _compatible_by_pos(arr1: np.ndarray, arr2: np.ndarray) -> bool:
-        assert np.isin(arr1, [0, 1]).all(), 'arr1 must be 0/1'
-        assert np.isin(arr2, [0, 1]).all(), 'arr2 must be 0/1'
-        assert arr1.size == arr2.size, 'arrays must be same size'
+    def _canopy_bino_test(
+        node1: MotifNode,
+        node2: MotifNode,
+        node12: MotifNode
+    ) -> float:
+        if getattr(node1, 'avg_edit', None) is None:
+            node1.avg_edit = node1.seqs['mle'].mean()
+        if getattr(node2, 'avg_edit', None) is None:
+            node2.avg_edit = node2.seqs['mle'].mean()
 
-        product = arr1 * arr2
-        return product.sum() == 0
+        p0 = max([node1.avg_edit, node2.avg_edit])
+        k = int(node12.seqs['k'].sum())
+        n = int(node12.seqs['n'].sum())
+
+        res = binomtest(k=k, n=n, p=p0, alternative='greater')
+
+        return res.pvalue
 

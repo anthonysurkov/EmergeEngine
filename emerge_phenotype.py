@@ -9,6 +9,7 @@ from collections import defaultdict
 from numpy.typing import NDArray
 from scipy.stats import binomtest, betabinom, permutation_test
 from scipy.optimize import minimize
+from tqdm.auto import tqdm
 
 from emerge_data import MotifNode, MotifEdge
 from emerge_forest import MotifForest
@@ -80,7 +81,10 @@ class ForestEdges:
         return self._perm_pval(X=child_edits, Y=not_child_edits)
 
     def compute_pvals(self, with_canopy: bool = True) -> None:
-        for edge in self.forest.iter_edges(with_canopy=with_canopy):
+        # annoyingly, iter object does not allow good progress bar without
+        # consuming it
+        edges = self.forest.iter_edges(with_canopy=with_canopy)
+        for edge in tqdm(edges, desc='Computing p-vals', unit='edge'):
             pval = self._compute_pval(edge.child, edge.parent)
             edge.pval = pval
 
@@ -95,6 +99,7 @@ class ForestEdges:
                 p_list.append(e.pval)
         pvals = np.array(p_list, dtype=float)
         cutoff = bh_fdr(pvals, q=self.q)
+
         for edge in self.forest.iter_edges(with_canopy=with_canopy):
             edge.sp = (cutoff is not None) and (edge.pval <= cutoff)
 
@@ -132,7 +137,8 @@ class ForestNodes:
             node.edit = self._compute_edit(node)
 
     def compute_pvals(self, with_canopy: bool = True) -> None:
-        for node in self.forest.flatten(with_canopy=with_canopy):
+        flattened = self.forest.flatten(with_canopy=with_canopy)
+        for node in tqdm(flattened, desc='Computing p-vals', unit='edge'):
             pval = self._compute_pval(node)
             node.pval = pval
 
@@ -146,8 +152,6 @@ class ForestNodes:
         for node in self.forest.flatten(with_canopy=with_canopy):
             node.sp = (cutoff is not None) and (node.pval <= cutoff)
 
-# need to add: depth statistic in BPE merger
-# forest.iter_edges() method
 class ForestPruner:
     def __init__(self, forest: MotifForest, q: float = 0.05) -> None:
         self.forest = forest
@@ -185,12 +189,12 @@ class ForestPruner:
                         keep.add(id(cur))
                         cur = getattr(cur, 'parent', None)
 
-        for node in nodes:
+        for node in tqdm(nodes, desc='Pruning', unit='node'):
             if id(node) in keep:
                 continue
             parent = getattr(node, 'parent', None)
             if parent is None or id(parent) in keep:
-                self.forest.prune(node)
+                self.forest.prune(node, with_canopy=with_canopy)
 
     def prune_by_enrichment(
         self,
@@ -215,10 +219,10 @@ class ForestPruner:
                         keep.add(id(cur))
                         cur = getattr(cur, 'parent', None)
 
-        for node in nodes:
+        for node in tqdm(nodes, desc='Pruning', unit='node'):
             if id(node) in keep:
                 continue
             parent = getattr(node, 'parent', None)
             if parent is None or id(parent) in keep:
-                self.forest.prune(node)
+                self.forest.prune(node, with_canopy=with_canopy)
 

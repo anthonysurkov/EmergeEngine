@@ -185,7 +185,6 @@ class EmergeBPE(EmergeHandler):
             pbar.update(1)
 
         pbar.close()
-        all_children = {c for (l, r) in self.merges for c in (l, r)}
 
         roots = [nd for nd in nodes.values() if len(nd.parents) == 0]
         return MotifForest(roots, self.df)

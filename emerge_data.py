@@ -264,21 +264,23 @@ class EmergeHandler:
     def _matches_mask(seq: str, mask: str) -> bool:
         return all(m == "X" or s == m for s, m in zip(seq, mask))
 
-@dataclass
 class MotifEdge:
-    parent: MotifNode
-    child: MotifNode
-    delta: float
-    pval: float
-    sp: bool = False
+    def __init__(
+        self,
+        parent: MotifNode,
+        child: MotifNode,
+        delta: Optional[float] = None,
+        pval: Optional[float] = None,
+        sp: bool = False
+    ):
+        self.parent = parent
+        self.child = child
+        self.delta = delta
+        self.pval = pval
+        self.sp = sp
 
-    @property
-    def parent_id(self) -> int:
-        return id(self.parent)
-
-    @property
-    def child_id(self) -> int:
-        return id(self.child)
+        self.parent_id = id(self.parent)
+        self.child_id = id(self.child)
 
 # eq=False
 class MotifNode:
@@ -306,7 +308,7 @@ class MotifNode:
         self.parents = []
         self.children = []
 
-        sc = set(special_chars) if special_chars if not None else {'Z'}
+        sc = set(special_chars) if special_chars else {'Z'}
 
         if motif_seq is None:
             self.base_chars = []
@@ -321,10 +323,9 @@ class MotifNode:
     def __repr__(self):
         J = 0 if self.seqs is None else len(self.seqs)
         return (
-            f'MotifNode(id={self.node_id}, motif={self.motif_seq}, '
-            f'J={J}, parents={len(self.parents)}, children={len(self.children)}'
+            f'MotifNode(id={self.node_id}, motif={self.motif_seq}, J={J}, '
+            f'parents={len(self.parents)}, children={len(self.children)})'
         )
-
 
     def add_child(self, child: MotifNode) -> None:
         if child not in self.children:
