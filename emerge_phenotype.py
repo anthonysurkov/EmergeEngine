@@ -80,27 +80,43 @@ class ForestEdges:
         not_child_edits = self._get_not_child_edits(child, parent)
         return self._perm_pval(X=child_edits, Y=not_child_edits)
 
-    def compute_pvals(self, with_canopy: bool = True) -> None:
-        # annoyingly, iter object does not allow good progress bar without
-        # consuming it
-        edges = self.forest.iter_edges(with_canopy=with_canopy)
+    def compute_pvals(
+        self,
+        *,
+        edges: list[MotifEdge] | None = None,
+        with_canopy: bool = True
+    ) -> None:
+        if edges is None:
+            edges = list(
+                self.forest.iter_frontier_edges(with_canopy = with_canopy)
+            )
         for edge in tqdm(edges, desc='Computing p-vals', unit='edge'):
             pval = self._compute_pval(edge.child, edge.parent)
             edge.pval = pval
 
     # sp = supported positive
-    def assign_sp(self, with_canopy: bool = True) -> None:
+    def assign_sp(
+        self,
+        *,
+        edges: list[MotifEdge] | None = None,
+        with_canopy: bool = True
+    ) -> None:
+        if edges is None:
+            edges = list(
+                self.forest.iter_frontier_edges(with_canopy=with_canopy)
+            )
+
         p_list = []
-        for e in self.forest.iter_edges(with_canopy=with_canopy):
-            if not hasattr(e, 'pval'):
+        for edge in edges:
+            if not hasattr(edge, 'pval'):
                 raise RuntimeError(
                     'Edge p-values not computed; run compute_pvals() first.'
                 )
-                p_list.append(e.pval)
+            p_list.append(edge.pval)
         pvals = np.array(p_list, dtype=float)
         cutoff = bh_fdr(pvals, q=self.q)
 
-        for edge in self.forest.iter_edges(with_canopy=with_canopy):
+        for edge in edges:
             edge.sp = (cutoff is not None) and (edge.pval <= cutoff)
 
 # add capability for different type of pvals later
@@ -153,50 +169,63 @@ class ForestNodes:
             node.sp = (cutoff is not None) and (node.pval <= cutoff)
 
 class ForestPruner:
-    def __init__(self, forest: MotifForest, q: float = 0.05) -> None:
+    def __init__(
+        self,
+        forest: MotifForest,
+        *,
+        with_canopy=True,
+        q: float = 0.05
+    ) -> None:
         self.forest = forest
+        self.edges = list(
+            self.forest.iter_frontier_edges(with_canopy=with_canopy)
+        )
         self.over_nodes = ForestNodes(forest=forest, q=q)
         self.over_edges = ForestEdges(forest=forest, q=q)
 
-    def prune_by_delta(
+    def revive_all(self) -> None:
+        flattened = self.forest.flatten()
+        for node in flattened:
+            node.alive = True
+
+    def kill_by_delta(
         self,
         with_canopy: bool = True,
         with_parents: bool = True
     ) -> None:
-        self.over_edges.compute_pvals(with_canopy=with_canopy)
-        self.over_edges.assign_sp(with_canopy=with_canopy)
+        self.over_edges.compute_pvals(with_canopy=with_canopy, edges=self.edges)
+        self.over_edges.assign_sp(with_canopy=with_canopy, edges=self.edges)
 
         out = defaultdict(list)
-        for e in self.forest.iter_edges(with_canopy=with_canopy):
-            out[id(e.parent)].append(e)
+        for e in self.edges:
+            out[id(e.child)].append(e)
 
         keep: set[int] = set()
         nodes = list(self.forest.flatten(with_canopy=with_canopy))
 
         for node in nodes:
             edges = out.get(id(node), [])
-            s = sum(bool(getattr(e, 'sp', False)) for e in edges)
-
+            s = sum(e.sp is True for e in edges)
             node.motif_state = 2 if s >= 2 else 1 if s == 1 else 0
             if node.motif_state > 0:
                 keep.add(id(node))
 
         if with_parents:
-            for node in nodes:
-                if id(node) in keep:
-                    cur = getattr(node, 'parent', None)
-                    while cur is not None:
-                        keep.add(id(cur))
-                        cur = getattr(cur, 'parent', None)
+            stack = [n for n in nodes if id(n) in keep]
+            seen: set[int] = set()
+            while stack:
+                cur = stack.pop()
+                cid = id(cur)
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                keep.add(cid)
+                stack.extend(getattr(cur, 'parents', []))
 
-        for node in tqdm(nodes, desc='Pruning', unit='node'):
-            if id(node) in keep:
-                continue
-            parent = getattr(node, 'parent', None)
-            if parent is None or id(parent) in keep:
-                self.forest.prune(node, with_canopy=with_canopy)
+        for node in nodes:
+            node.alive = (id(node) in keep)
 
-    def prune_by_enrichment(
+    def kill_by_enrichment(
         self,
         with_canopy: bool = True,
         with_parents: bool = True
@@ -219,10 +248,6 @@ class ForestPruner:
                         keep.add(id(cur))
                         cur = getattr(cur, 'parent', None)
 
-        for node in tqdm(nodes, desc='Pruning', unit='node'):
-            if id(node) in keep:
-                continue
-            parent = getattr(node, 'parent', None)
-            if parent is None or id(parent) in keep:
-                self.forest.prune(node, with_canopy=with_canopy)
+        for node in nodes:
+            node.alive = (id(node) in keep)
 

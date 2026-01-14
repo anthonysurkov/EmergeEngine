@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 import re
-from typing import Optional, Literal, Callable, Any
+from typing import Literal, Callable, Any
 from collections.abc import Iterable
 from scipy.stats import binomtest
 from tqdm.auto import tqdm
@@ -20,7 +20,7 @@ class MotifForest(EmergeHandler):
     def __init__(
         self,
         roots: list[MotifNode],
-        df_emerge: Optional[pd.DataFrame],
+        df_emerge: pd.DataFrame | None,
         *,
         seq_col: str = '5to3',
         n_col: str = 'n',
@@ -65,9 +65,9 @@ class MotifForest(EmergeHandler):
 
     def traverse(
         self,
-        visited: Optional[set] = None,
-        func: Optional[Callable[..., Any]] = None,
-        params: Optional[list[Any]] = None,
+        visited: set | None = None,
+        func: Callable[..., Any] | None = None,
+        params: list[Any] | None = None,
         with_canopy: bool = True
     ) -> list:
         if self.roots is None:
@@ -115,6 +115,7 @@ class MotifForest(EmergeHandler):
 
         return out
 
+    # potentially deprecated:
     def prune(self, node: MotifNode, with_canopy: bool = True) -> None:
         if not self.roots:
             raise ValueError('arg `roots` cannot be None')
@@ -147,6 +148,67 @@ class MotifForest(EmergeHandler):
         node.children = []
         node.parents = []
 
+    def iter_frontier_edges(
+        self,
+        *,
+        with_canopy: bool = True
+    ) -> Iterator[MotifEdge]:
+        memo: dict[int, list[MotifNode]] = {}
+        seen_edges: set[tuple[int, int]] = set()
+
+        for child in self.flatten(with_canopy=with_canopy):
+            if not getattr(child, 'alive', True):
+                continue
+
+            for parent in self.frontier_parents(child, memo=memo):
+                if not getattr(parent, 'alive', True):
+                    continue
+                k = (id(parent), id(child))
+                if k in seen_edges:
+                    continue
+                seen_edges.add(k)
+                yield MotifEdge(parent=parent, child=child)
+
+    def frontier_parents(
+        self,
+        node: MotifNode,
+        *,
+        memo: dict[int, list[MotifNode]] | None = None,
+    ) -> list[MotifNode]:
+        if memo is None:
+            memo = {}
+
+        key = id(node)
+        if key in memo:
+            return memo[key]
+
+        out: list[MotifNode] = []
+        seen: set[int] = set()
+
+        stack = list(getattr(node, 'parents', []))
+        while stack:
+            p = stack.pop()
+            pid = id(p)
+            if pid in seen:
+                continue
+            seen.add(pid)
+
+            if getattr(p, 'alive', True):
+                out.append(p)
+                continue
+
+            stack.extend(getattr(p, 'parents', []))
+
+        uniq: list[MotifNode] = []
+        used: set[int] = set()
+        for p in out:
+            if id(p) not in used:
+                uniq.append(p)
+                used.add(id(p))
+
+        memo[key] = uniq
+        return uniq
+
     def to_html(
         self,
         outfile: str = 'forest.html',
@@ -159,42 +221,37 @@ class MotifForest(EmergeHandler):
         open_browser: bool = True,
         prog: str = 'dot',
     ) -> None:
-
-        nodes = self.flatten(with_canopy=with_canopy)
-        print("nodes:", len(nodes))
-        print("max parents:", max(len(n.parents) for n in nodes))
-        print("max children:", max(len(n.children) for n in nodes))
-        print("parents>=5:", sum(len(n.parents) >= 5 for n in nodes))
-        print("children>=5:", sum(len(n.children) >= 5 for n in nodes))
-
-        seqs = [n.motif_seq for n in nodes if n.motif_seq is not None]
-        print("motif_seq collisions:", len(seqs) - len(set(seqs)))
-
-
         if not self.roots:
             raise ValueError('arg `forest` cannot be None/empty.')
 
+        def is_alive(n: MotifNode) -> bool:
+            return bool(getattr(n, 'alive', True))
+
         nodes = self.flatten(with_canopy=with_canopy)
-        nodes = [nd for nd in nodes if nd.motif_seq is not None]
+        nodes = [v for v in nodes if v.motif_seq is not None and is_alive(v)]
         if not nodes:
-            raise ValueError('no motifs to render after filtering for seq')
+            raise ValueError('no motifs to render after filtering by aliveness')
 
         # de-duplicate nodes
         all_nodes: dict[str, MotifNode] = {}
         for nd in nodes:
             key = nd.motif_seq
-            if key in all_nodes and all_nodes[key] is not nd:
-                continue
-            all_nodes[key] = nd
+            if key not in all_nodes:
+                all_nodes[key] = nd
 
         G = nx.DiGraph()
         G.add_nodes_from(all_nodes.keys())
 
-        for nd in all_nodes.values():
-            for child in getattr(nd, 'children', []):
-                cseq = getattr(child, 'motif_seq', None)
-                if cseq in all_nodes:
-                    G.add_edge(nd.motif_seq, cseq)
+        # frontier parents
+        frontier_memo: dict[int, list[MotifNode]] = {}
+
+        for child_seq, child_nd in all_nodes.items():
+            for p in self.frontier_parents(child_nd):
+                pseq = getattr(p, 'motif_seq', None)
+                if pseq is None:
+                    continue
+                if pseq in all_nodes:
+                    G.add_edge(pseq, child_seq)
 
         # layout: graphviz when possible; otherwise fallback
         try:

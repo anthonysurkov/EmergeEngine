@@ -301,6 +301,7 @@ class MotifNode:
         self.prevalence = prevalence
         self.edit = edit
 
+        self.alive = True
         self.motif_state = None
         self.pval = None
         self.sp = None
