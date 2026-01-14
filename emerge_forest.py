@@ -51,13 +51,70 @@ class MotifForest(EmergeHandler):
                     f'found: {type(node)}'
                 )
 
+        self._edges: dict[bool, dict[tuple[int, int], MotifEdge]] = {
+            True: {}, False: {}
+        }
+        self._edges_valid: dict[bool, bool] = {True: False, False: False}
+
     def __iter__(self) -> Iterator[MotifNode]:
         return iter(self.flatten())
 
-    def iter_edges(self, with_canopy=True) -> Iterator[MotifEdge]:
+    def invalidate_edges(self, with_canopy: bool = True) -> None:
+        self._edges_valid[True] = False
+
+    def build_edges(self, with_canopy: bool = True) -> None:
+        old = self._edges[with_canopy]
+        new: dict[tuple[int, int], MotifEdge] = {}
+
         for child in self.flatten(with_canopy=with_canopy):
-            for parent in getattr(child, 'parents', []) or []:
-                yield MotifEdge(parent=parent, child=child)
+            for parent in getattr(child, 'parents', None) or []:
+                k = (id(parent), id(child))
+                e = old.get(k)
+                if e is None:
+                    e = MotifEdge(parent=parent, child=child)
+                else:
+                    e.parent = parent
+                    e.child = child
+                new[k] = e
+
+        self._edges[with_canopy] = new
+        self._edges_valid[with_canopy] = True
+
+    def iter_edges(self, with_canopy=True) -> Iterator[MotifEdge]:
+        if not self._edges_valid[with_canopy]:
+            self.build_edges(with_canopy=with_canopy)
+        yield from self._edges[with_canopy].values()
+
+    def iter_frontier_edges(
+        self,
+        *,
+        with_canopy: bool = True
+    ) -> Iterator[MotifEdge]:
+        if not self._edges_valid[with_canopy]:
+            self.build_edges(with_canopy=with_canopy)
+
+        store = self._edges[with_canopy]
+        memo: dict[int, list[MotifNode]] = {}
+        seen_edges: set[tuple[int, int]] = set()
+
+        for child in self.flatten(with_canopy=with_canopy):
+            if not getattr(child, 'alive', True):
+                continue
+
+            for parent in self.frontier_parents(child, memo=memo):
+                if not getattr(parent, 'alive', True):
+                    continue
+
+                k = (id(parent), id(child))
+                if k in seen_edges:
+                    continue
+                seen_edges.add(k)
+
+                e = store.get(k)
+                if e is None:
+                    e = MotifEdge(parent=parent, child=child)
+                    store[k] = e
+                yield e
 
     def with_canopy(self) -> MotifForest:
         self.canopy = ForestCanopy(self)
@@ -145,29 +202,10 @@ class MotifForest(EmergeHandler):
                     new_parents.append(parent)
             child.parents = new_parents
 
+        self.invalidate_edges()
+
         node.children = []
         node.parents = []
-
-    def iter_frontier_edges(
-        self,
-        *,
-        with_canopy: bool = True
-    ) -> Iterator[MotifEdge]:
-        memo: dict[int, list[MotifNode]] = {}
-        seen_edges: set[tuple[int, int]] = set()
-
-        for child in self.flatten(with_canopy=with_canopy):
-            if not getattr(child, 'alive', True):
-                continue
-
-            for parent in self.frontier_parents(child, memo=memo):
-                if not getattr(parent, 'alive', True):
-                    continue
-                k = (id(parent), id(child))
-                if k in seen_edges:
-                    continue
-                seen_edges.add(k)
-                yield MotifEdge(parent=parent, child=child)
 
     def frontier_parents(
         self,
@@ -208,6 +246,25 @@ class MotifForest(EmergeHandler):
 
         memo[key] = uniq
         return uniq
+
+    def to_pd(
+        self,
+        *,
+        with_canopy: bool = True
+    ) -> pd.DataFrame:
+        entries = []
+        for node in self.flatten(with_canopy=with_canopy):
+            p = getattr(node, 'parents', None)
+            entries.append({
+                'motif_seq': getattr(node, 'motif_seq', None),
+                'alive': getattr(node, 'alive', None),
+                'node_id': getattr(node, 'node_id', None),
+                'edit': getattr(node, 'edit', None),
+                'motif_state': getattr(node, 'motif_state', None),
+                'parent1': getattr(p[0], 'motif_seq', None) if p else None,
+                'parent2': getattr(p[1], 'motif_seq', None) if p else None
+            })
+        return pd.DataFrame.from_records(entries)
 
     def to_html(
         self,
@@ -263,11 +320,11 @@ class MotifForest(EmergeHandler):
             pos = nx.spring_layout(G, seed=0)
 
 
-        xs = np.array([p[0] for p in pos.values()], dtype=float)
-        ys = np.array([p[1] for p in pos.values()], dtype=float)
+        #xs = np.array([p[0] for p in pos.values()], dtype=float)
+        #ys = np.array([p[1] for p in pos.values()], dtype=float)
 
-        xs -= xs.mean() if xs.size else 0.0
-        ys -= ys.mean() if ys.size else 0.0
+        #xs -= xs.mean() if xs.size else 0.0
+        #ys -= ys.mean() if ys.size else 0.0
 
         scale = max(
             xs.std()

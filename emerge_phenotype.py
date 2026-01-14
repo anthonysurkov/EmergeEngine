@@ -83,13 +83,9 @@ class ForestEdges:
     def compute_pvals(
         self,
         *,
-        edges: list[MotifEdge] | None = None,
         with_canopy: bool = True
     ) -> None:
-        if edges is None:
-            edges = list(
-                self.forest.iter_frontier_edges(with_canopy = with_canopy)
-            )
+        edges = list(self.forest.iter_edges(with_canopy = with_canopy))
         for edge in tqdm(edges, desc='Computing p-vals', unit='edge'):
             pval = self._compute_pval(edge.child, edge.parent)
             edge.pval = pval
@@ -98,13 +94,9 @@ class ForestEdges:
     def assign_sp(
         self,
         *,
-        edges: list[MotifEdge] | None = None,
         with_canopy: bool = True
     ) -> None:
-        if edges is None:
-            edges = list(
-                self.forest.iter_frontier_edges(with_canopy=with_canopy)
-            )
+        edges = list(self.forest.iter_edges(with_canopy=with_canopy))
 
         p_list = []
         for edge in edges:
@@ -177,9 +169,6 @@ class ForestPruner:
         q: float = 0.05
     ) -> None:
         self.forest = forest
-        self.edges = list(
-            self.forest.iter_frontier_edges(with_canopy=with_canopy)
-        )
         self.over_nodes = ForestNodes(forest=forest, q=q)
         self.over_edges = ForestEdges(forest=forest, q=q)
 
@@ -188,16 +177,20 @@ class ForestPruner:
         for node in flattened:
             node.alive = True
 
+    def assign_delta(self, with_canopy: bool = True) -> None:
+        edges = list(self.forest.iter_edges(with_canopy=with_canopy))
+        self.over_edges.compute_pvals(with_canopy=with_canopy)
+        self.over_edges.assign_sp(with_canopy=with_canopy)
+
     def kill_by_delta(
         self,
         with_canopy: bool = True,
         with_parents: bool = True
     ) -> None:
-        self.over_edges.compute_pvals(with_canopy=with_canopy, edges=self.edges)
-        self.over_edges.assign_sp(with_canopy=with_canopy, edges=self.edges)
+        self.assign_delta(with_canopy=with_canopy)
 
         out = defaultdict(list)
-        for e in self.edges:
+        for e in self.forest.iter_edges(with_canopy=with_canopy):
             out[id(e.child)].append(e)
 
         keep: set[int] = set()
@@ -225,6 +218,7 @@ class ForestPruner:
         for node in nodes:
             node.alive = (id(node) in keep)
 
+    # not up to date. needs to be brought up to kill_by_delta standard
     def kill_by_enrichment(
         self,
         with_canopy: bool = True,
