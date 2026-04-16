@@ -151,12 +151,12 @@ class ForestNodes:
             node.pval = pval
 
     # sp = supported positive
-    def assign_sp(self, with_canopy: bool = True) -> None:
+    def assign_sp(self, *, with_canopy: bool = True) -> None:
         pvals = np.array(
             [n.pval for n in self.forest.flatten(with_canopy=with_canopy)],
             dtype=float
         )
-        cutoff = bh_fdr(pvals, q=self.q)
+        cutoff = bh_fdr(pvals, q=q)
         for node in self.forest.flatten(with_canopy=with_canopy):
             node.sp = (cutoff is not None) and (node.pval <= cutoff)
 
@@ -171,6 +171,17 @@ class ForestPruner:
         self.forest = forest
         self.over_nodes = ForestNodes(forest=forest, q=q)
         self.over_edges = ForestEdges(forest=forest, q=q)
+
+    # rerooting: define new roots by some new criteria
+    # args: attribute to reroot by, criteria for attribute
+    # checks: whether arg exists, etc
+    # optional: drop any nodes that don't find a new root
+    #
+    # complication: how to handle multiple roots in a lineage?
+    # let A --> B --> C, where B and C are both valid motifs
+    # answer: reroot by last saved valid root candidate. i.e., traverse until
+    # no parents, then take last root candidate
+    #def reroot(self
 
     def revive_all(self) -> None:
         flattened = self.forest.flatten()

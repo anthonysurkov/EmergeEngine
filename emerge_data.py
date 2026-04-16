@@ -123,6 +123,7 @@ class EmergeHandler:
         seq_col: str = '5to3',
         n_col: str = 'n',
         k_col: str = 'k',
+        edit_col: str = 'mle',
         to_rna: bool = True
     ):
         if not isinstance(df_emerge, pd.DataFrame):
@@ -147,27 +148,68 @@ class EmergeHandler:
                 'arg `k_col` must be a string'
                 f'is: {type(k_col)}'
             )
+
         if df_emerge.shape[0] == 0:
             raise ValueError(
                 '`df_emerge` must have more than one entry associated with it'
             )
-        elif seq_col not in df_emerge.columns:
+        if seq_col not in df_emerge.columns:
             raise KeyError('arg `seq_col` is not a valid col in `df_emerge`')
-        elif k_col not in df_emerge.columns:
-            raise KeyError('arg `k_col` is not a valid col in `df_emerge`')
-        elif n_col not in df_emerge.columns:
-            raise KeyError('arg `n_col` is not a valid col in `df_emerge`')
-        if df_emerge[[seq_col, n_col, k_col]].isnull().any().any():
+
+        k_col_exists = n_col_exists = edit_col_exists = True
+        if k_col not in df_emerge.columns:
+            if edit_col not in df_emerge.columns:
+                raise KeyError(
+                    'arg `k_col` is not a valid col in `df_emerge` and '
+                    'no valid arg `edit_col` provided.'
+                )
+            k_col_exists = False
+        if n_col not in df_emerge.columns:
+            if edit_col not in df_emerge.columns:
+                raise KeyError(
+                    'arg `n_col` is not a valid col in `df_emerge` and '
+                    'no valid arg `edit_col` provided.'
+                )
+            n_col_exists = False
+        if edit_col not in df_emerge.columns:
+            if k_col not in df_emerge.columns or n_col not in df_emerge.columns:
+                raise KeyError(
+                    'arg `edit_col` is not a valid col in `df_emerge` and '
+                    'either valid arg `k_col` or `n_col` not specified'
+                )
+            edit_col_exists = False
+
+        if df_emerge[seq_col].isnull().any():
             raise ValueError(
-                '`df_emerge` cannot contain NaN values` in neither `seq_col`'
-                ' nor `n_col` nor `k_col`.'
+                '`df_emerge` cannot contain NaN values in neither `seq_col`'
             )
+        if k_col_exists:
+            if df_emerge[k_col].isnull().any():
+                raise ValueError(
+                    '`df_emerge` cannot contain NaN values in `k_col`'
+                )
+            if not all(
+                isinstance(x, numbers.Integral) for x in df_emerge[k_col]
+            ):
+                raise TypeError('Every element of `k_col` must be an int')
+        if n_col_exists:
+            if df_emerge[n_col].isnull().any():
+                raise ValueError(
+                    '`df_emerge` cannot contain NaN values in `n_col`'
+                )
+            if not all(
+                isinstance(x, numbers.Integral) for x in df_emerge[n_col]
+            ):
+                raise TypeError('Every element of `n_col` must be an int')
+
+        if edit_col_exists:
+            if df_emerge[edit_col].isnull().any():
+                raise ValueError(
+                    '`df_emerge` cannot contain NaN values in `edit_col`'
+                )
+
         if not all(isinstance(x, str) for x in df_emerge[seq_col]):
             raise TypeError('Every element of `seq_col` must be a string')
-        if not all(isinstance(x, numbers.Integral) for x in df_emerge[k_col]):
-            raise TypeError('Every element of `k_col` must be an int')
-        if not all(isinstance(x, numbers.Integral) for x in df_emerge[n_col]):
-            raise TypeError('Every element of `n_col` must be an int')
 
         seq_len = len(df_emerge[seq_col].iloc[0])
         if df_emerge[seq_col].str.len().nunique() != 1:
@@ -183,14 +225,27 @@ class EmergeHandler:
                 df_emerge[seq_col].str.replace('T','U', regex=False)
             )
 
-        cols = [seq_col, n_col, k_col]
+        if edit_col_exists:
+            cols = [seq_col, edit_col]
+        else:
+            cols = [seq_col, n_col, k_col]
         self.df = df_emerge[cols]
-        self.df = self.df.rename(
-            columns={seq_col: '5to3', n_col: 'n', k_col: 'k'}
-        )
-        self.df['mle'] = self.df['k'] / self.df['n']
+
+        if edit_col_exists:
+            self.df = self.df.rename(
+                columns={seq_col: '5to3', edit_col: 'mle'}
+            )
+            self.edit_col = True
+        else:
+            self.df = self.df.rename(
+                columns={seq_col: '5to3', n_col: 'n', k_col: 'k'}
+            )
+            self.df['mle'] = self.df['k'] / self.df['n']
+            self.edit_col = False
+
         self.seq_len = seq_len
         self.df_len = self.df.shape[0]
+
 
     def query(
         self,
@@ -206,7 +261,10 @@ class EmergeHandler:
             df = df[mask]
 
         if columns is None:
-            columns = ['5to3','n','k','mle']
+            if self.edit_col:
+                columns = ['5to3', 'mle']
+            else:
+                columns = ['5to3','n','k','mle']
         df = df.loc[:, list(columns)]
 
         return df.copy(deep=True) if copy else df

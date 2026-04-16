@@ -281,77 +281,106 @@ class MotifForest(EmergeHandler):
         if not self.roots:
             raise ValueError('arg `forest` cannot be None/empty.')
 
-        def is_alive(n: MotifNode) -> bool:
-            return bool(getattr(n, 'alive', True))
+        # 1) Collect SP edges (assumes you've already computed edge.sp somewhere)
+        edges_all = list(self.iter_edges(with_canopy=with_canopy))
+        sp_edges = [e for e in edges_all if bool(getattr(e, 'sp', False))]
+        if not sp_edges:
+            raise ValueError('no SP edges found; nothing to render')
 
-        nodes = self.flatten(with_canopy=with_canopy)
-        nodes = [v for v in nodes if v.motif_seq is not None and is_alive(v)]
-        if not nodes:
-            raise ValueError('no motifs to render after filtering by aliveness')
+        # 2) Seed node set with endpoints of SP edges
+        nodes_by_id: dict[int, MotifNode] = {}
+        for e in sp_edges:
+            nodes_by_id[id(e.parent)] = e.parent
+            nodes_by_id[id(e.child)] = e.child
 
-        # de-duplicate nodes
+        # 3) Ancestor closure (pull in roots / dead scaffolding)
+        stack = list(nodes_by_id.values())
+        seen: set[int] = set(nodes_by_id.keys())
+        while stack:
+            cur = stack.pop()
+            for p in (getattr(cur, 'parents', None) or []):
+                pid = id(p)
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                nodes_by_id[pid] = p
+                stack.append(p)
+
+        # 4) Build a canonical seq->node map (dedupe by motif_seq)
         all_nodes: dict[str, MotifNode] = {}
-        for nd in nodes:
-            key = nd.motif_seq
-            if key not in all_nodes:
-                all_nodes[key] = nd
+        for nd in nodes_by_id.values():
+            seq = getattr(nd, 'motif_seq', None)
+            if seq is None:
+                continue
+            if seq not in all_nodes:
+                all_nodes[seq] = nd
 
+        if not all_nodes:
+            raise ValueError('no motifs to render after filtering by motif_seq')
+
+        # 5) Edges to draw: keep any structural edge whose endpoints are included
+        included_ids: set[int] = set(nodes_by_id.keys())
+        edges_draw: list[MotifEdge] = [
+            e for e in edges_all
+            if id(e.parent) in included_ids and id(e.child) in included_ids
+        ]
+
+        # 6) Build NetworkX graph using motif_seq keys
         G = nx.DiGraph()
         G.add_nodes_from(all_nodes.keys())
 
-        # frontier parents
-        frontier_memo: dict[int, list[MotifNode]] = {}
+        seen_e: set[tuple[str, str]] = set()
+        for e in edges_draw:
+            u = getattr(e.parent, 'motif_seq', None)
+            v = getattr(e.child, 'motif_seq', None)
+            if u is None or v is None:
+                continue
+            if u not in all_nodes or v not in all_nodes:
+                continue
+            k = (u, v)
+            if k in seen_e:
+                continue
+            seen_e.add(k)
+            G.add_edge(u, v)
 
-        for child_seq, child_nd in all_nodes.items():
-            for p in self.frontier_parents(child_nd):
-                pseq = getattr(p, 'motif_seq', None)
-                if pseq is None:
-                    continue
-                if pseq in all_nodes:
-                    G.add_edge(pseq, child_seq)
-
-        # layout: graphviz when possible; otherwise fallback
+        # 7) Layout
         try:
-            if G.number_of_edges() > 0:
+            if G.number_of_nodes() > 0 and G.number_of_edges() > 0:
                 pos = graphviz_layout(G, prog=prog)
             else:
                 pos = nx.spring_layout(G, seed=0)
         except Exception:
             pos = nx.spring_layout(G, seed=0)
 
+        if pos:
+            xs = np.array([p[0] for p in pos.values()], dtype=float)
+            ys = np.array([p[1] for p in pos.values()], dtype=float)
 
-        #xs = np.array([p[0] for p in pos.values()], dtype=float)
-        #ys = np.array([p[1] for p in pos.values()], dtype=float)
+            xs -= xs.mean() if xs.size else 0.0
+            ys -= ys.mean() if ys.size else 0.0
 
-        #xs -= xs.mean() if xs.size else 0.0
-        #ys -= ys.mean() if ys.size else 0.0
+            scale = max(xs.std() if xs.size else 1.0, ys.std() if ys.size else 1.0, 1e-9)
+            xs = xs / scale * 800
+            ys = ys / scale * 800
 
-        scale = max(
-            xs.std()
-            if xs.size else 1.0,
-            ys.std()
-            if ys.size else 1.0, 1e-9
-        )
-        xs = xs / scale * 800
-        ys = ys / scale * 800
+            pos = {k: (float(x), float(y)) for k, x, y in zip(pos.keys(), xs, ys)}
+        else:
+            pos = {}
 
-        pos = {k: (float(x), float(y)) for k, x, y in zip(pos.keys(), xs, ys)}
-
-        # set up coloring
+        # 8) Coloring setup
         norm = None
         cmap = None
         status_palette = {
-            0: '#bdbdbd',  # pruned/none (if it slips in)
+            0: '#bdbdbd',  # none/pruned
             1: '#6baed6',  # context-ish
             2: '#31a354',  # true-ish
         }
 
         if color_by == 'editing':
             edit_vals = [
-                getattr(nd, 'edit', None)
+                float(getattr(nd, 'edit', np.nan))
                 for nd in all_nodes.values()
-                if getattr(nd, 'edit', None) is not None
-                and np.isfinite(getattr(nd, 'edit', None))
+                if getattr(nd, 'edit', None) is not None and np.isfinite(getattr(nd, 'edit'))
             ]
             if edit_vals:
                 vals = np.asarray(edit_vals, dtype=float)
@@ -361,11 +390,10 @@ class MotifForest(EmergeHandler):
                     norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=True)
                     cmap = cm.get_cmap('Reds')
 
-        # sizes
-        prevs = np.array([
-            float(getattr(nd, 'prevalence', 1) or 1)
-            for nd in all_nodes.values()
-            ], dtype=float
+        # 9) Sizes (by prevalence, default 1)
+        prevs = np.array(
+            [float(getattr(nd, 'prevalence', 1) or 1) for nd in all_nodes.values()],
+            dtype=float
         )
         prevs[~np.isfinite(prevs)] = 1.0
         prevs[prevs <= 0] = 1.0
@@ -377,64 +405,43 @@ class MotifForest(EmergeHandler):
         node_sizes = 10 + 40 * (sizes_scaled - sizes_scaled.min()) / denom
         size_map = dict(zip(all_nodes.keys(), node_sizes))
 
-        # pyvis render
-        net = Network(
-            height='750px', width='100%', directed=True, notebook=False
-        )
+        # 10) PyVis render
+        net = Network(height='750px', width='100%', directed=True, notebook=False)
         net.toggle_physics(False)
         net.set_edge_smooth('straight')
 
-        # add nodes with color
         for seq, nd in all_nodes.items():
             p_raw = getattr(nd, 'pval', None)
             p_str = (
-                f'{p_raw:.4f}'
-                if isinstance(p_raw, (int, float, np.integer, np.floating))
-                and np.isfinite(p_raw)
+                f'{float(p_raw):.4f}'
+                if isinstance(p_raw, (int, float, np.integer, np.floating)) and np.isfinite(p_raw)
                 else '–'
             )
 
             avg = getattr(nd, 'edit', None)
+            edit_str = f'{float(avg):.3f}' if avg is not None and np.isfinite(avg) else '–'
+
             prev = getattr(nd, 'prevalence', None)
-            prev = (
-                int(prev)
-                if isinstance(prev, (int, np.integer))
-                and prev > 0
-                else 1
-            )
+            prev_i = int(prev) if isinstance(prev, (int, np.integer)) and prev > 0 else 1
 
             status_val = getattr(nd, status_attr, None)
 
             if color_by == 'motif_status':
-                color = (status_palette.get(
-                    int(status_val)
-                    if status_val is not None
-                    else 0, '#bdbdbd'
-                ))
+                try:
+                    color = status_palette.get(int(status_val), '#bdbdbd') if status_val is not None else '#bdbdbd'
+                except Exception:
+                    color = '#bdbdbd'
             else:
                 color = '#cccccc'
-                if (
-                    cmap is not None
-                    and norm is not None
-                    and avg is not None
-                    and np.isfinite(avg)
-                ):
+                if cmap is not None and norm is not None and avg is not None and np.isfinite(avg):
                     color = mcolors.to_hex(cmap(norm(float(avg))))
-
-            edit_str = (
-                f'{avg:.3f}'
-                if avg is not None
-                and np.isfinite(avg)
-                else '–'
-            )
-            status_str = status_val if status_val is not None else "–"
 
             node_title = (
                 f'Seq: {seq}, '
-                f'Count: {prev}, '
+                f'Count: {prev_i}, '
                 f'Edit avg: {edit_str}, '
                 f'p-val: {p_str}, '
-                f'{status_attr}: {status_str}'
+                f'{status_attr}: {status_val if status_val is not None else "–"}'
             )
 
             net.add_node(
@@ -445,7 +452,6 @@ class MotifForest(EmergeHandler):
                 size=float(size_map.get(seq, 10.0)),
             )
 
-        # add edges (may be none; that's fine)
         for u, v in G.edges():
             net.add_edge(u, v)
 

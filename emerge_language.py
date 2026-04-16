@@ -21,6 +21,7 @@ class EmergeBPE(EmergeHandler):
         seq_col: str = '5to3',
         n_col: str = 'n',
         k_col: str = 'k',
+        edit_col: str = 'mle',
         to_rna: bool = True
     ) -> None:
         super().__init__(
@@ -28,6 +29,7 @@ class EmergeBPE(EmergeHandler):
             seq_col = seq_col,
             n_col = n_col,
             k_col = k_col,
+            edit_col = edit_col,
             to_rna = to_rna
         )
         # check kmax
