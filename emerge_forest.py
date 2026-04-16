@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-import re
 from typing import Literal, Callable, Any
 from collections.abc import Iterable
-from scipy.stats import binomtest
 from tqdm.auto import tqdm
 
 import networkx as nx
@@ -26,7 +24,6 @@ class MotifForest(EmergeHandler):
         n_col: str = 'n',
         k_col: str = 'k',
         to_rna: bool = True,
-        lazy_canopy: bool = True
     ) -> None:
         if df_emerge is not None:
             super().__init__(
@@ -40,9 +37,6 @@ class MotifForest(EmergeHandler):
             raise ValueError('arg `roots` cannot be None')
 
         self.roots = roots
-        self.canopy = None
-        if not lazy_canopy:
-            self.canopy = ForestCanopy(self)
 
         for node in roots:
             if not isinstance(node, MotifNode):
@@ -51,22 +45,20 @@ class MotifForest(EmergeHandler):
                     f'found: {type(node)}'
                 )
 
-        self._edges: dict[bool, dict[tuple[int, int], MotifEdge]] = {
-            True: {}, False: {}
-        }
-        self._edges_valid: dict[bool, bool] = {True: False, False: False}
+        self._edges: dict[tuple[int, int], MotifEdge] = {}
+        self._edges_valid: bool = False
 
     def __iter__(self) -> Iterator[MotifNode]:
         return iter(self.flatten())
 
-    def invalidate_edges(self, with_canopy: bool = True) -> None:
-        self._edges_valid[True] = False
+    def invalidate_edges(self) -> None:
+        self._edges_valid = False
 
-    def build_edges(self, with_canopy: bool = True) -> None:
-        old = self._edges[with_canopy]
+    def build_edges(self) -> None:
+        old = self._edges
         new: dict[tuple[int, int], MotifEdge] = {}
 
-        for child in self.flatten(with_canopy=with_canopy):
+        for child in self.flatten():
             for parent in getattr(child, 'parents', None) or []:
                 k = (id(parent), id(child))
                 e = old.get(k)
@@ -77,27 +69,22 @@ class MotifForest(EmergeHandler):
                     e.child = child
                 new[k] = e
 
-        self._edges[with_canopy] = new
-        self._edges_valid[with_canopy] = True
+        self._edges = new
+        self._edges_valid = True
 
-    def iter_edges(self, with_canopy=True) -> Iterator[MotifEdge]:
-        if not self._edges_valid[with_canopy]:
-            self.build_edges(with_canopy=with_canopy)
-        yield from self._edges[with_canopy].values()
+    def iter_edges(self) -> Iterator[MotifEdge]:
+        if not self._edges_valid:
+            self.build_edges()
+        yield from self._edges.values()
 
-    def iter_frontier_edges(
-        self,
-        *,
-        with_canopy: bool = True
-    ) -> Iterator[MotifEdge]:
-        if not self._edges_valid[with_canopy]:
-            self.build_edges(with_canopy=with_canopy)
+    def iter_frontier_edges(self) -> Iterator[MotifEdge]:
+        if not self._edges_valid:
+            self.build_edges()
 
-        store = self._edges[with_canopy]
         memo: dict[int, list[MotifNode]] = {}
         seen_edges: set[tuple[int, int]] = set()
 
-        for child in self.flatten(with_canopy=with_canopy):
+        for child in self.flatten():
             if not getattr(child, 'alive', True):
                 continue
 
@@ -110,22 +97,17 @@ class MotifForest(EmergeHandler):
                     continue
                 seen_edges.add(k)
 
-                e = store.get(k)
+                e = self._edges.get(k)
                 if e is None:
                     e = MotifEdge(parent=parent, child=child)
-                    store[k] = e
+                    self._edges[k] = e
                 yield e
-
-    def with_canopy(self) -> MotifForest:
-        self.canopy = ForestCanopy(self)
-        return self
 
     def traverse(
         self,
         visited: set | None = None,
         func: Callable[..., Any] | None = None,
         params: list[Any] | None = None,
-        with_canopy: bool = True
     ) -> list:
         if self.roots is None:
             raise ValueError('arg `roots` cannot be None')
@@ -135,7 +117,7 @@ class MotifForest(EmergeHandler):
             params = []
 
         results: list[Any] = []
-        nodes = self.flatten(with_canopy=with_canopy)
+        nodes = self.flatten()
 
         desc = f'Traversing with {func.__name__}' if func else f'Traversing'
         for node in tqdm(nodes, desc=desc, unit='node'):
@@ -144,7 +126,7 @@ class MotifForest(EmergeHandler):
 
         return results
 
-    def flatten(self, with_canopy: bool = True) -> list[MotifNode]:
+    def flatten(self) -> list[MotifNode]:
         if self.roots is None:
             raise ValueError('arg `roots` cannot be None')
 
@@ -161,23 +143,14 @@ class MotifForest(EmergeHandler):
             out.append(node)
             stack.extend(getattr(node, 'children', []))
 
-        if with_canopy:
-            if self.canopy is None:
-                self.canopy = ForestCanopy(self)
-            for node in self.canopy:
-                nid = id(node)
-                if nid not in seen:
-                    seen.add(nid)
-                    out.append(node)
-
         return out
 
     # potentially deprecated:
-    def prune(self, node: MotifNode, with_canopy: bool = True) -> None:
+    def prune(self, node: MotifNode) -> None:
         if not self.roots:
             raise ValueError('arg `roots` cannot be None')
 
-        nodes = self.flatten(with_canopy=with_canopy)
+        nodes = self.flatten()
         parents = list(node.parents)
         children = list(node.children)
 
@@ -247,13 +220,9 @@ class MotifForest(EmergeHandler):
         memo[key] = uniq
         return uniq
 
-    def to_pd(
-        self,
-        *,
-        with_canopy: bool = True
-    ) -> pd.DataFrame:
+    def to_pd(self) -> pd.DataFrame:
         entries = []
-        for node in self.flatten(with_canopy=with_canopy):
+        for node in self.flatten():
             p = getattr(node, 'parents', None)
             entries.append({
                 'motif_seq': getattr(node, 'motif_seq', None),
@@ -274,7 +243,6 @@ class MotifForest(EmergeHandler):
         *,
         color_by: Literal['editing', 'motif_status'] = 'editing',
         status_attr: str = 'motif_state',
-        with_canopy: bool = True,
         open_browser: bool = True,
         prog: str = 'dot',
     ) -> None:
@@ -282,7 +250,7 @@ class MotifForest(EmergeHandler):
             raise ValueError('arg `forest` cannot be None/empty.')
 
         # 1) Collect SP edges (assumes you've already computed edge.sp somewhere)
-        edges_all = list(self.iter_edges(with_canopy=with_canopy))
+        edges_all = list(self.iter_edges())
         sp_edges = [e for e in edges_all if bool(getattr(e, 'sp', False))]
         if not sp_edges:
             raise ValueError('no SP edges found; nothing to render')
@@ -484,112 +452,3 @@ class MotifForest(EmergeHandler):
 
             with open(outfile, 'w', encoding='utf-8') as f:
                 f.write(html)
-
-class ForestCanopy:
-    def __init__(
-        self,
-        forest: MotifForest,
-        offset: int = 2
-    ):
-        if not isinstance(forest, MotifForest):
-            raise TypeError(
-                'arg `forest` must be a MotifForest. '
-                f'got: {type(forest)}'
-            )
-        self.forest = forest
-        self.offset = offset # rename. this is just how much shorter than
-                             # seq_len candidate_seq must be in self.generate()
-        self.canopy = None
-        self.generate()
-
-    def __iter__(self):
-        if not self.canopy:
-            self.generate()
-        return iter(self.canopy)
-
-    def generate(self) -> None:
-        if not self.canopy:
-            self.canopy = []
-
-        nodes = self.forest.flatten(with_canopy=False)
-        node_ids = [node.node_id for node in nodes]
-
-        while nodes:
-            this_node = nodes.pop()
-            for that_node in nodes:
-                if not self._compatible(
-                    this_node.motif_seq,
-                    that_node.motif_seq
-                ):
-                    continue
-
-                candidate_seq = this_node.motif_seq + that_node.motif_seq
-                if len(candidate_seq) / 2 > self.forest.seq_len - self.offset:
-                    continue
-
-                new_node = MotifNode(
-                    motif_seq = candidate_seq,
-                    node_id = max(node_ids) + 1
-                )
-                new_node.seqs = self.forest.get_motif_seqs(new_node.motif_seq)
-                if new_node.seqs is None or new_node.seqs.empty:
-                    continue
-
-                new_node.p = self._canopy_bino_test(
-                    node1=this_node,
-                    node2=that_node,
-                    node12=new_node
-                )
-
-                new_node.add_parent(this_node)
-                new_node.add_parent(that_node)
-
-                self.canopy.append(new_node)
-
-    def _compatible(self, token1: str, token2: str) -> bool:
-        pos1 = self._token_to_pos(token=token1)
-        pos2 = self._token_to_pos(token=token2)
-        return self._compatible_by_pos(arr1=pos1, arr2=pos2)
-
-    @staticmethod
-    def _compatible_by_pos(arr1: np.ndarray, arr2: np.ndarray) -> bool:
-        assert np.isin(arr1, [0, 1]).all(), 'arr1 must be 0/1'
-        assert np.isin(arr2, [0, 1]).all(), 'arr2 must be 0/1'
-        assert arr1.size == arr2.size, 'arrays must be same size'
-
-        product = arr1 * arr2
-        return product.sum() == 0
-
-    def _token_to_pos(self, token: str) -> np.ndarray:
-        assert isinstance(token, str), 'token must be str'
-
-        pos_nums = [int(m) for m in re.findall(r'\d+', token)]
-        if not pos_nums:
-            return np.array([], dtype=int)
-
-        pos_set = set(pos_nums)
-        return np.array(
-            [1 if i in pos_set else 0 for i in range(0, self.forest.seq_len+1)],
-             dtype=int
-        )
-
-    #uh figure out what this does lol. before pushing, preferably
-    @staticmethod
-    def _canopy_bino_test(
-        node1: MotifNode,
-        node2: MotifNode,
-        node12: MotifNode
-    ) -> float:
-        if getattr(node1, 'avg_edit', None) is None:
-            node1.avg_edit = node1.seqs['mle'].mean()
-        if getattr(node2, 'avg_edit', None) is None:
-            node2.avg_edit = node2.seqs['mle'].mean()
-
-        p0 = max([node1.avg_edit, node2.avg_edit])
-        k = int(node12.seqs['k'].sum())
-        n = int(node12.seqs['n'].sum())
-
-        res = binomtest(k=k, n=n, p=p0, alternative='greater')
-
-        return res.pvalue
-

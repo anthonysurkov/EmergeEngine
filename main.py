@@ -8,17 +8,12 @@ from emerge_phenotype import ForestPruner
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / 'data'
-INFILE = DATA_DIR / 'proqr.csv'
-#INFILE = DATA_DIR / 'r255x_top.csv'
+INFILE = DATA_DIR / 'r270x_z.csv'
 
 def main():
-    wc = False
-
     #df = pd.read_csv(INFILE)
     df = pd.read_csv(INFILE, index_col=0)
     #df = df.rename(columns={'n_ad1': 'n', 'k_ad1': 'k'})
-    #print(df)
-
     print(df)
 
     emerge_handle = EmergeHandler(df_emerge = df, edit_col = 'proqr_edit')
@@ -37,18 +32,17 @@ def main():
     )
     emerge_bpe.encode()
     emerge_forest = emerge_bpe.to_forest()
-    #emerge_pruner = ForestPruner(emerge_forest, with_canopy=False)
-    #emerge_pruner.kill_by_delta(with_canopy=wc, with_parents=False)
+    emerge_pruner = ForestPruner(emerge_forest)
+    emerge_pruner.kill_by_delta(with_parents=False)
 
-    df = emerge_forest.to_pd(with_canopy=wc)#
+    df = emerge_forest.to_pd()
     print(df)
-    #df_alive = df[df['motif_state'] > 0]
-    #print(df_alive)
+    df_alive = df[df['motif_state'] > 0]
+    print(df_alive)
     #df_motif = df[df['motif_state'] == 2]
 
     emerge_forest.to_html(
-        outfile='test_b.html',
-        with_canopy=False,
+        outfile='test.html',
         color_by='motif_status'
     )
 
